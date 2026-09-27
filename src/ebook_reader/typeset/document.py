@@ -29,7 +29,7 @@ from ..domain.models import Block, BlockKind, Span
 from .images import ImageCache
 from .style import StyleSet
 
-__all__ = ["IMAGE_KEY_PREFIX", "ReaderDocument", "build_document"]
+__all__ = ["IMAGE_KEY_PREFIX", "ReaderDocument", "build_document", "layout_continuous"]
 
 IMAGE_KEY_PREFIX = "epub-image:"
 
@@ -115,6 +115,18 @@ def build_document(
     cursor.endEditBlock()
     doc.setModified(False)
     return doc
+
+
+def layout_continuous(document: QTextDocument, width: float) -> float:
+    """Lay *document* out as one column *width* wide; return how tall it came out.
+
+    The page height is ``-1``, which Qt reads as "no height limit" and lays the whole
+    document out as a single page (ADR-016).  Passing ``0`` looks equivalent and is
+    not: a zero-height page size means "the height has not been decided yet", and
+    ``pageCount()`` then returns an uninitialised value.
+    """
+    document.setPageSize(QSizeF(max(32.0, width), -1.0))
+    return max(0.0, document.size().height())
 
 
 def _insert_image(

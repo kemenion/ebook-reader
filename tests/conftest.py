@@ -68,6 +68,46 @@ def largest_section(kangpo) -> int:
     )
 
 
+def _headings(book, index: int) -> list[int]:
+    """Positions of the blocks that are headings with something to say (FR-018)."""
+    return [
+        position
+        for position, block in enumerate(book.blocks(index))
+        if block.is_heading and block.text.strip()
+    ]
+
+
+@pytest.fixture(scope="session")
+def heading_section(kangpo) -> int:
+    """The 康波 section carrying the most headings: the fullest outline available.
+
+    The outline column is heading-only (ADR-016), so a test that needs rows has to
+    be looking at a section that has headings - the book opens on its cover, which
+    has none.
+    """
+    return max(
+        range(kangpo.section_count),
+        key=lambda index: (len(_headings(kangpo, index)), -index),
+    )
+
+
+@pytest.fixture(scope="session")
+def headingless_section(binan) -> int:
+    """The longest 币安 section with no headings: the one with nothing to list.
+
+    币安 is the book that used to exercise the page-per-row fallback; with that gone
+    it is the book that proves a section without headings gets no outline at all.
+    """
+    candidates = [
+        index
+        for index in range(binan.section_count)
+        if len(binan.blocks(index)) > 100 and not _headings(binan, index)
+    ]
+    if not candidates:
+        pytest.skip("reference book has no long section without headings")
+    return max(candidates, key=lambda index: len(binan.blocks(index)))
+
+
 @pytest.fixture(scope="session")
 def qapp():
     """A single offscreen ``QGuiApplication`` for the whole session."""

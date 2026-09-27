@@ -24,6 +24,8 @@ Rectangle {
     readonly property string cMarginLabel: ctl ? ctl.marginLabel : ""
     readonly property string cStatusText: ctl ? ctl.statusText : ""
 
+    // Fixed: Main.qml deliberately leaves this one its own width, because it is the
+    // only panel that floats over the text rather than taking a column.
     width: 330
     color: cPanel
 
@@ -170,11 +172,14 @@ Rectangle {
                 font.pixelSize: 12
                 lineHeight: 1.5
                 wrapMode: Text.Wrap
-                text: "← → / PgUp PgDn / 空格：翻页\n" +
-                      "Home / End：本节首末页\n" +
+                text: "鼠标右键：全部操作的菜单\n" +
+                      "滚轮：连续滚动（上下滚动一屏用 PgUp / PgDn / 空格）\n" +
+                      "↑ ↓：上下滚动一行\n" +
+                      "Home / End：本卷开头 / 结尾\n" +
                       "[ / ]：上一章 / 下一章\n" +
                       "Ctrl + / Ctrl −：字号\n" +
-                      "T：目录   S：设置   F：全屏\n" +
+                      "T：目录   O：本节大纲   S：设置\n" +
+                      "Esc：关闭面板   F11：全屏\n" +
                       "Ctrl+Q：退出"
             }
 

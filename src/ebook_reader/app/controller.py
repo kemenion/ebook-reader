@@ -1,9 +1,15 @@
 """``ReaderController``: the only surface QML talks to.
 
 Holds all mutable application state (per C-013) and orchestrates the layers:
-opening books, moving through pages, reacting to window resizes, and persisting
-the reading position.  It contains no parsing and no typesetting logic - those
-live behind :class:`~ebook_reader.typeset.engine.LayoutEngine`.
+opening books, scrolling through a section, reacting to window resizes, and
+persisting the reading position.  It contains no parsing and no typesetting logic -
+those live behind :class:`~ebook_reader.typeset.engine.LayoutEngine`.
+
+The position on screen is a distance from the top of the current section, because
+that is what a continuous column has (ADR-016).  What gets *remembered* is still a
+block index, because that is the one coordinate that survives a font-size or
+window-size change (ADR-011); the distance inside that block is kept as a fraction
+of its height.
 """
 
 from __future__ import annotations
@@ -18,7 +24,14 @@ from PySide6.QtGui import QColor, QImage
 
 from ..domain import BookError, EpubBook
 from ..domain.models import TocEntry
-from ..typeset import FontChoice, LayoutEngine, Theme, TypographySettings
+from ..typeset import (
+    FontChoice,
+    LayoutEngine,
+    LaidOutSection,
+    Theme,
+    TypographySettings,
+    quantise_offset,
+)
 from ..typeset.settings import PageGeometry
 from .settings_store import BookState, SettingsStore
 
@@ -26,10 +39,19 @@ __all__ = ["ReaderController"]
 
 _log = logging.getLogger(__name__)
 
-#: Rendered pages kept in memory.  A page image is a few megabytes, and keeping
-#: the previous page makes backwards turns instant; more than a handful would
-#: work against the memory budget (ADR-008 / NFR-002).
-_PAGE_CACHE_SIZE = 5
+#: Rendered windows kept in memory.  A window image is a few megabytes (the text
+#: column plus one rendering quantum), and keeping the last few makes scrolling back
+#: instant; more than a handful would work against the memory budget
+#: (ADR-008 / NFR-002).
+_WINDOW_CACHE_SIZE = 5
+
+#: Offsets closer than this are the same place.  Scrolling arrives as floating point
+#: arithmetic from QML, and a repaint for a sub-pixel move is wasted work.
+_OFFSET_EPSILON = 0.5
+
+#: How many lines one wheel notch scrolls.  Three is what every browser on every
+#: desktop uses, which is the behaviour this reader is imitating (FR-073).
+_WHEEL_LINES = 3
 
 #: How many pixels the margin control adds or removes per step.
 _MARGIN_STEP = 12
@@ -37,11 +59,63 @@ _MARGIN_STEP = 12
 _FONT_SIZE_STEP = 1.0
 _LINE_HEIGHT_STEP = 0.05
 
+#: Deepest heading level the outline column lists (FR-019).  Levels 4 to 6 are
+#: publishers' decoration: they are within 20% of the body size, which reads as
+#: emphasized text rather than as structure, and listing them turns a map into noise.
+_OUTLINE_MAX_LEVEL = 3
+
+#: U+2060 WORD JOINER, which kinsoku injects to keep punctuation off line starts.
+#: Right for layout, wrong for the UI: it survives into the outline, where it
+#: makes a label differ from the same text read in the page (FR-109).
+_WORD_JOINER = "\u2060"
+
+
+def _clean_label(text: str) -> str:
+    """Collapse whitespace and strip the layout-only word joiners."""
+    return " ".join(text.replace(_WORD_JOINER, "").split())
+
+
+def _build_outline(section: LaidOutSection) -> list[dict[str, object]]:
+    """Rows describing the inside of one laid-out section (FR-018).
+
+    Heading-based only (ADR-016).  With no pages to map, the alternative - rows for
+    equally sized slices of a continuous column - would move every time the window
+    is resized, and a map whose entries wander is not a map.  So the rule is simply:
+    the section's own headings, down to level :data:`_OUTLINE_MAX_LEVEL`, and no rows
+    at all when the section has none.  The column is not offered in that case
+    (FR-019): an empty column is worse than no column.
+
+    ``offset`` is what a row jumps to, ``block`` records which block it came from,
+    and ``row`` is its index - the panel highlights a row by comparing that against
+    the controller's ``currentOutlineRow``, which is a property of the scroll
+    position rather than of the rows themselves.
+    """
+    rows: list[dict[str, object]] = []
+    for index, block in enumerate(section.blocks):
+        if not block.is_heading:
+            continue
+        level = max(1, min(6, block.level))
+        if level > _OUTLINE_MAX_LEVEL:
+            continue
+        title = _clean_label(block.text)
+        if not title:
+            continue
+        rows.append(
+            {
+                "title": title,
+                "level": level,
+                "offset": section.block_offset(index),
+                "block": index,
+                "row": len(rows),
+            }
+        )
+    return rows
+
 
 class ReaderController(QObject):
     """State machine behind the QML user interface."""
 
-    pageChanged = Signal()
+    viewChanged = Signal()
     layoutChanged = Signal()
     settingsChanged = Signal()
     bookChanged = Signal()
@@ -55,17 +129,21 @@ class ReaderController(QObject):
         self._settings: TypographySettings = self._store.settings()
         self._book: EpubBook | None = None
         self._engine: LayoutEngine | None = None
-        self._page_cache: OrderedDict[tuple[int, int], QImage] = OrderedDict()
+        self._window_cache: OrderedDict[tuple[int, float], QImage] = OrderedDict()
         self._section_index = 0
-        self._page_index = 0
+        self._scroll_offset = 0.0
         self._view_size = QSizeF(900.0, 1300.0)
         self._device_ratio = 1.0
         self._toc_flat: list[tuple[TocEntry, int]] = []
         self._toc_visible = False
         self._settings_visible = False
+        self._outline_visible = False
+        self._outline_key: tuple[object, int, int, float] | None = None
+        self._outline_cache: list[dict[str, object]] = []
         self._error_message = ""
         self._last_open_ms = 0.0
         self._last_section_ms = 0.0
+        self._last_render_ms = 0.0
         self._startup_started = time.perf_counter()
         self._startup_ms = 0.0
 
@@ -86,62 +164,176 @@ class ReaderController(QObject):
 
     bookAuthor = Property(str, _get_book_author, notify=bookChanged)
 
-    def _get_page_image(self) -> QImage:
+    def _get_view_image(self) -> QImage:
+        """The rendered window at the current offset, rasterised on demand (ADR-008).
+
+        Rendered at the *quantised* offset and cached under it, so nudging the wheel
+        inside one quantum reuses the image QML already has; the sub-quantum part is
+        drawn as a translate (see ``pan``).
+        """
         if self._engine is None:
             return QImage()
-        key = (self._section_index, self._page_index)
-        image = self._page_cache.get(key)
+        key = (self._section_index, self.windowOffset)
+        image = self._window_cache.get(key)
         if image is None:
-            image = self._engine.render(*key)
-            self._page_cache[key] = image
-            while len(self._page_cache) > _PAGE_CACHE_SIZE:
-                self._page_cache.popitem(last=False)
+            started = time.perf_counter()
+            image = self._engine.render_window(self._section_index, self._scroll_offset)
+            self._last_render_ms = (time.perf_counter() - started) * 1000.0
+            self._window_cache[key] = image
+            while len(self._window_cache) > _WINDOW_CACHE_SIZE:
+                self._window_cache.popitem(last=False)
         return image
 
-    pageImage = Property(QImage, _get_page_image, notify=pageChanged)
+    viewImage = Property(QImage, _get_view_image, notify=viewChanged)
 
-    def _get_page_index(self) -> int:
-        return self._page_index
+    def _get_scroll_offset(self) -> float:
+        """Distance from the top of the current section, in logical pixels."""
+        return self._scroll_offset
 
-    pageIndex = Property(int, _get_page_index, notify=pageChanged)
+    scrollOffset = Property(float, _get_scroll_offset, notify=viewChanged)
 
-    def _get_page_count(self) -> int:
-        return self._section_page_count()
+    def _get_window_offset(self) -> float:
+        """Offset the current image was rasterised at, on the quantum grid."""
+        return quantise_offset(self._scroll_offset)
 
-    pageCount = Property(int, _get_page_count, notify=pageChanged)
+    windowOffset = Property(float, _get_window_offset, notify=viewChanged)
+
+    def _get_pan(self) -> float:
+        """How far the current image is drawn above the window, in logical pixels.
+
+        ``windowOffset + pan`` is exactly ``scrollOffset``, which is what makes the
+        text move smoothly while Python only runs once per quantum (ADR-016).
+        """
+        return self._scroll_offset - self.windowOffset
+
+    pan = Property(float, _get_pan, notify=viewChanged)
+
+    def _get_scroll_max(self) -> float:
+        section = self._current_section()
+        return section.max_offset if section is not None else 0.0
+
+    scrollMax = Property(float, _get_scroll_max, notify=viewChanged)
+
+    def _get_content_height(self) -> float:
+        section = self._current_section()
+        return section.height if section is not None else 0.0
+
+    contentHeight = Property(float, _get_content_height, notify=viewChanged)
+
+    def _get_viewport_height(self) -> float:
+        """Height of the content box, i.e. how much text is on screen at once."""
+        return self._view_geometry().content_height
+
+    viewportHeight = Property(float, _get_viewport_height, notify=viewChanged)
+
+    def _get_view_page_size(self) -> QSizeF:
+        """Page box a window image is rendered for; ``PageItem`` letterboxes it."""
+        return self._view_geometry().page_size
+
+    viewPageSize = Property(QSizeF, _get_view_page_size, notify=viewChanged)
+
+    def _get_bottom_margin(self) -> float:
+        """Height of the bottom margin.
+
+        QML draws the "next chapter" line inside it (FR-074): the window can be
+        scrolled until the last line sits exactly on the bottom of the content box,
+        so anything drawn there would otherwise cover the text the reader is on.
+        """
+        return self._view_geometry().margin_bottom
+
+    bottomMargin = Property(float, _get_bottom_margin, notify=viewChanged)
+
+    def _get_line_step(self) -> float:
+        """One line of body text, in pixels: the unit the scroll actions move by."""
+        if self._engine is not None:
+            return self._engine.line_step
+        return max(1.0, self._settings.font_size * self._settings.line_height)
+
+    lineStep = Property(float, _get_line_step, notify=viewChanged)
+
+    def _get_wheel_step(self) -> float:
+        """Distance one wheel notch scrolls (FR-073).
+
+        Computed here rather than in QML so the wheel, the arrow keys and the menu
+        all move by the same amount, and so a test can assert the number.
+        """
+        return self.lineStep * _WHEEL_LINES
+
+    wheelStep = Property(float, _get_wheel_step, notify=viewChanged)
+
+    def _get_at_section_end(self) -> bool:
+        """Whether the window is as far down as the section goes (FR-074)."""
+        return self._scroll_offset >= self.scrollMax - _OFFSET_EPSILON
+
+    atSectionEnd = Property(bool, _get_at_section_end, notify=viewChanged)
+
+    def _get_has_next_section(self) -> bool:
+        return self._book is not None and self._section_index + 1 < self._book.section_count
+
+    hasNextSection = Property(bool, _get_has_next_section, notify=viewChanged)
+
+    def _get_next_section_title(self) -> str:
+        """Title of the chapter that follows, shown at the end of this one (FR-074).
+
+        The reader is told what comes next instead of being taken there: moving on
+        for them takes away the moment where they decide to stop.  Empty when
+        nothing follows this section, or when no contents entry names it.
+        """
+        if not self.hasNextSection or self._book is None:
+            return ""
+        return self._section_title_at(self._section_index + 1)
+
+    nextSectionTitle = Property(str, _get_next_section_title, notify=viewChanged)
 
     def _get_section_index(self) -> int:
         return self._section_index
 
-    sectionIndex = Property(int, _get_section_index, notify=pageChanged)
+    sectionIndex = Property(int, _get_section_index, notify=viewChanged)
 
     def _get_section_count(self) -> int:
         return self._book.section_count if self._book else 0
 
     sectionCount = Property(int, _get_section_count, notify=bookChanged)
 
-    def _get_section_title(self) -> str:
+    def _section_title_at(self, index: int) -> str:
+        """First table-of-contents title pointing at *index*, or ``""``."""
         for entry, section in self._toc_flat:
-            if section == self._section_index and entry.title:
+            if section == index and entry.title:
                 return entry.title
-        return self.bookTitle
+        return ""
 
-    sectionTitle = Property(str, _get_section_title, notify=pageChanged)
+    def _get_section_title(self) -> str:
+        # A section no contents entry names is an untitled part of the book, so the
+        # book's own title is the honest answer there.
+        return self._section_title_at(self._section_index) or self.bookTitle
+
+    sectionTitle = Property(str, _get_section_title, notify=viewChanged)
+
+    def _section_progress(self) -> float:
+        """How far through the current section the reader is, 0..1 (FR-072).
+
+        Measured to the *end* of the window rather than to its top: a chapter that
+        fits on one screen reads as finished, not as 0%.
+        """
+        section = self._current_section()
+        if section is None or section.height <= 0.0:
+            return 0.0
+        return max(0.0, min(1.0, (self._scroll_offset + self.viewportHeight) / section.height))
 
     def _get_progress_text(self) -> str:
         if self._book is None:
             return ""
         return (
-            f"第 {self._page_index + 1} / {self._section_page_count()} 页"
+            f"本卷 {self._section_progress() * 100:.0f}%"
             f"   ·   全书 {self._overall_percent():.0f}%"
         )
 
-    progressText = Property(str, _get_progress_text, notify=pageChanged)
+    progressText = Property(str, _get_progress_text, notify=viewChanged)
 
     def _get_progress(self) -> float:
         return self._overall_percent() / 100.0
 
-    progress = Property(float, _get_progress, notify=pageChanged)
+    progress = Property(float, _get_progress, notify=viewChanged)
 
     def _get_status_text(self) -> str:
         if self._error_message:
@@ -150,24 +342,28 @@ class ReaderController(QObject):
             return ""
         stats = self._engine.last_stats
         cache = self._engine.image_stats()
-        parts = [f"打开 {self._last_open_ms:.0f} ms", f"排版 {self._last_section_ms:.0f} ms"]
+        parts = [
+            f"打开 {self._last_open_ms:.0f} ms",
+            f"排版 {self._last_section_ms:.0f} ms",
+            f"绘制 {self._last_render_ms:.0f} ms",
+        ]
         if stats is not None:
-            parts.append(f"{stats.blocks} 块 / {stats.pages} 页")
-            parts.append(f"分页修正 {max(0, stats.iterations - 1)} 次")
+            screens = stats.height / max(1.0, self.viewportHeight)
+            parts.append(f"{stats.blocks} 块 / {screens:.1f} 屏")
         parts.append(f"图片 {cache.items} 张 / {cache.bytes / 1e6:.1f} MB")
         return "   ·   ".join(parts)
 
-    statusText = Property(str, _get_status_text, notify=pageChanged)
+    statusText = Property(str, _get_status_text, notify=viewChanged)
 
     def _get_startup_ms(self) -> float:
-        """Wall-clock time from process start to the first page being ready.
+        """Wall-clock time from process start to the first window being ready.
 
         This is the number NFR-001 is about, so it is a first-class property
         rather than something only visible in a profiler.
         """
         return self._startup_ms
 
-    startupMs = Property(float, _get_startup_ms, notify=pageChanged)
+    startupMs = Property(float, _get_startup_ms, notify=viewChanged)
 
     def _get_error_message(self) -> str:
         return self._error_message
@@ -256,12 +452,29 @@ class ReaderController(QObject):
 
     marginLabel = Property(str, _get_margin_label, notify=settingsChanged)
 
+    def _get_margin(self) -> int:
+        """The margin on its own, for the menu row that shows the current value."""
+        return int(self._settings.margin_left)
+
+    margin = Property(int, _get_margin, notify=settingsChanged)
+
     # ------------------------------------------------------------------ panels
 
     def _get_toc_visible(self) -> bool:
         return self._toc_visible
 
     tocVisible = Property(bool, _get_toc_visible, notify=layoutChanged)
+
+    def _get_toc_available(self) -> bool:
+        """Whether the book brought a table of contents to show (FR-013).
+
+        Two callers need this: the shell, which must not open a column with nothing
+        in it, and the right-click menu, which greys its 目录 row out instead of
+        offering an operation that would do nothing.
+        """
+        return bool(self._toc_flat)
+
+    tocAvailable = Property(bool, _get_toc_available, notify=tocChanged)
 
     def _get_settings_visible(self) -> bool:
         return self._settings_visible
@@ -290,6 +503,45 @@ class ReaderController(QObject):
 
     currentTocRow = Property(int, _get_current_toc_row, notify=tocChanged)
 
+    # ----------------------------------------------------------------- outline
+
+    def _get_outline_visible(self) -> bool:
+        return self._outline_visible
+
+    outlineVisible = Property(bool, _get_outline_visible, notify=layoutChanged)
+
+    def _get_outline_available(self) -> bool:
+        """Whether the current section has anything for the panel to show (FR-019).
+
+        An empty outline column is worse than no column, so QML keeps the panel
+        shut while this is false.  It now means "this section has at least one
+        heading down to level 3" - the page map it used to fall back on has no
+        meaning over a continuous column (ADR-016).
+        """
+        return bool(self._outline())
+
+    outlineAvailable = Property(bool, _get_outline_available, notify=viewChanged)
+
+    def _get_outline_items(self) -> list[dict[str, object]]:
+        return self._outline()
+
+    outlineItems = Property(list, _get_outline_items, notify=viewChanged)
+
+    def _get_current_outline_row(self) -> int:
+        """Row of the heading the reader is under, or ``-1`` before the first one.
+
+        Kept apart from the rows themselves so that scrolling only recomputes an
+        index instead of rebuilding the model (FR-018).
+        """
+        active = -1
+        for row, item in enumerate(self._outline()):
+            offset = item["offset"]
+            if isinstance(offset, (int, float)) and float(offset) <= self._scroll_offset:
+                active = row
+        return active
+
+    currentOutlineRow = Property(int, _get_current_outline_row, notify=viewChanged)
+
     # ------------------------------------------------------------ book loading
 
     @Slot(str)
@@ -310,7 +562,7 @@ class ReaderController(QObject):
         if self._book is not None:
             self._book.close()
         self._book = book
-        self._page_cache.clear()
+        self._window_cache.clear()
         self._engine = LayoutEngine(
             book,
             self._settings,
@@ -320,23 +572,34 @@ class ReaderController(QObject):
         self._toc_flat = _flatten_toc(book.toc, book)
         self._last_open_ms = (time.perf_counter() - started) * 1000.0
 
+        # The map comes up with the book (FR-013): a reader who does not know that
+        # `T` exists should still be able to see that this book has a table of
+        # contents.  A book without one keeps the column shut - an empty column is
+        # worse than no column, the same rule the outline follows (FR-019).
+        self._toc_visible = bool(self._toc_flat)
+
         state = self._store.book_state(path)
         if restore_section >= 0:
             self._section_index = min(max(0, restore_section), max(0, book.section_count - 1))
-            self._page_index = 0
+            self._scroll_offset = 0.0
         else:
             self._section_index = min(
                 max(0, state.section), max(0, book.section_count - 1)
             )
-            self._page_index = self._page_for_state(state)
+            self._scroll_offset = self._offset_for_state(state)
+        self._drop_outline()
         self._startup_ms = (time.perf_counter() - self._startup_started) * 1000.0
 
         self.bookChanged.emit()
         self.tocChanged.emit()
-        self._publish_page(set_section=True)
+        # The columns are part of the layout: without this signal QML keeps the
+        # table of contents the controller just opened hidden, because `tocVisible`
+        # is only re-read when `layoutChanged` arrives.
+        self.layoutChanged.emit()
+        self._publish_view(set_section=True)
         self.statusMessage.emit(self.statusText)
         _log.info(
-            "opened %r: %d sections, %d toc rows, parsed in %.0f ms, first page ready in %.0f ms",
+            "opened %r: %d sections, %d toc rows, parsed in %.0f ms, first window ready in %.0f ms",
             book.meta.title or book.path.name,
             book.section_count,
             len(self._toc_flat),
@@ -352,42 +615,100 @@ class ReaderController(QObject):
             self._book.close()
         self._book = None
         self._engine = None
-        self._page_cache.clear()
+        self._window_cache.clear()
+        self._scroll_offset = 0.0
         self._toc_flat = []
+        # Columns belong to the book that was open, so they go with it.  The
+        # settings drawer is book-independent and stays where the reader left it.
+        self._toc_visible = False
+        self._outline_visible = False
+        self._drop_outline()
+        # There is no window any more.  The signal is not decoration: the outline
+        # panel derives its availability from the section, so without it the binding
+        # that decides whether the column exists keeps its old answer and the column
+        # stays open over a book that has been closed.
+        self.viewChanged.emit()
         self.bookChanged.emit()
         self.tocChanged.emit()
         self.layoutChanged.emit()
 
-    def _page_for_state(self, state: BookState) -> int:
-        if self._engine is None:
-            return 0
-        try:
-            section = self._engine.section(state.section)
-        except (BookError, IndexError):
-            return 0
-        return section.block_page(state.block)
+    def _offset_for_state(self, state: BookState) -> float:
+        """Distance the remembered resume point is at in the current layout.
+
+        The triple is a block index plus a fraction of that block's own height
+        (ADR-011), which is what makes the place survive a font-size change: the
+        block is the same paragraph, and the fraction means the same thing inside it
+        - even for a block with no text at all, such as a full-page figure, where a
+        character offset would have nothing to point at.
+        """
+        section = self._current_section()
+        if section is None or not section.blocks:
+            return 0.0
+        block = max(0, min(int(state.block), len(section.blocks) - 1))
+        fraction = max(0, min(1000, int(state.char_offset))) / 1000.0
+        return section.block_offset(block) + section.block_height(block) * fraction
 
     # -------------------------------------------------------------- navigation
 
-    @Slot()
-    def nextPage(self) -> None:
-        if self._engine is None:
-            return
-        if self._page_index + 1 < self._section_page_count():
-            self._page_index += 1
-            self._publish_page()
-            return
-        self._step_section(1)
+    @Slot(float)
+    def scrollBy(self, distance: float) -> None:
+        """Move the window by *distance* pixels; positive scrolls down (FR-073).
+
+        This is what the wheel calls, and it is also what the arrow keys call with
+        one line: one action, so the two can never drift apart.
+        """
+        self._set_offset(self._scroll_offset + float(distance))
 
     @Slot()
-    def previousPage(self) -> None:
-        if self._engine is None:
+    def scrollUp(self) -> None:
+        self.scrollBy(-self.lineStep)
+
+    @Slot()
+    def scrollDown(self) -> None:
+        self.scrollBy(self.lineStep)
+
+    @Slot()
+    def scrollPageUp(self) -> None:
+        self.scrollBy(-self._page_step())
+
+    @Slot()
+    def scrollPageDown(self) -> None:
+        self.scrollBy(self._page_step())
+
+    def _page_step(self) -> float:
+        """One screen, less one line.
+
+        The line that was at the top is still at the top afterwards, which is how
+        every browser's Page Down behaves: the reader keeps their foothold instead
+        of hunting for the line they were on (FR-073).
+        """
+        return max(1.0, self.viewportHeight - self.lineStep)
+
+    @Slot()
+    def scrollToTop(self) -> None:
+        self._set_offset(0.0)
+
+    @Slot()
+    def scrollToBottom(self) -> None:
+        self._set_offset(self.scrollMax)
+
+    @Slot(float)
+    def scrollToFraction(self, fraction: float) -> None:
+        """Move the window to *fraction* of the scrollable distance (the scroll bar)."""
+        self._set_offset(max(0.0, min(1.0, float(fraction))) * self.scrollMax)
+
+    def _set_offset(self, offset: float) -> None:
+        """Move the window to *offset*, clamped to the section.
+
+        Deliberately does *not* walk into the next section at the end (FR-074): the
+        reader stays at the end of this chapter until they ask to leave, which is
+        what a long web page does too.
+        """
+        offset = max(0.0, min(float(offset), self.scrollMax))
+        if abs(offset - self._scroll_offset) < _OFFSET_EPSILON:
             return
-        if self._page_index > 0:
-            self._page_index -= 1
-            self._publish_page()
-            return
-        self._step_section(-1)
+        self._scroll_offset = offset
+        self._publish_view()
 
     @Slot()
     def nextSection(self) -> None:
@@ -397,6 +718,12 @@ class ReaderController(QObject):
     def previousSection(self) -> None:
         self._step_section(-1)
 
+    @Slot()
+    def goToNextSection(self) -> None:
+        """Follow the "next chapter" line the window shows at the end (FR-074)."""
+        if self.hasNextSection:
+            self.goToSection(self._section_index + 1)
+
     def _step_section(self, delta: int) -> None:
         if self._engine is None or self._book is None:
             return
@@ -405,27 +732,20 @@ class ReaderController(QObject):
             return
         self._save_state()
         self._section_index = target
-        # Going back should land on the last page of the previous section, which
-        # is what a reader expects from a physical book.
-        self._page_index = (
-            0 if delta > 0 else max(0, self._engine.section(target).page_count - 1)
-        )
-        self._publish_page(set_section=True)
+        # Going back lands at the end of the previous chapter, which is where a
+        # reader who mistook the next one for this one wants to be.
+        self._scroll_offset = 0.0 if delta > 0 else self._engine.section(target).max_offset
+        self._publish_view(set_section=True)
 
     @Slot()
-    def firstPage(self) -> None:
-        if self._page_index == 0:
-            return
-        self._page_index = 0
-        self._publish_page()
+    def scrollToSectionTop(self) -> None:
+        """Back to the top of the current section (the menu's 篇首 row)."""
+        self._set_offset(0.0)
 
     @Slot()
-    def lastPage(self) -> None:
-        last = max(0, self._section_page_count() - 1)
-        if self._page_index == last:
-            return
-        self._page_index = last
-        self._publish_page()
+    def scrollToSectionEnd(self) -> None:
+        """Down to the bottom of the current section (the menu's 篇末 row)."""
+        self._set_offset(self.scrollMax)
 
     # ----------------------------------------------------------------- jumping
 
@@ -438,43 +758,112 @@ class ReaderController(QObject):
         index = max(0, min(index, self._book.section_count - 1))
         self._save_state()
         self._section_index = index
-        self._page_index = 0
+        self._scroll_offset = 0.0
         section = self._engine.section(index)
         if fragment:
             block = section.anchor_block(fragment)
             if block is not None:
-                self._page_index = section.block_page(block)
-        self._publish_page(set_section=True)
+                self._scroll_offset = section.block_offset(block)
+        self._publish_view(set_section=True)
 
     @Slot(int)
     def goToTocRow(self, row: int) -> None:
+        """Jump to a chapter and leave the map on screen (FR-013).
+
+        The panel used to close here.  That rule came from the time it floated over
+        the text and covering the page was the cost - FR-015 - and taking a column
+        of its own made it wrong: following the contents through several chapters
+        meant reopening the panel at every hop, with no way of seeing where the
+        next one led.  FR-015 is superseded by ADR-014 and this is where the
+        decision is kept; the outline behaves the same way (FR-018).  `T`, the
+        button at the bottom left or `Esc` are the ways out.
+        """
         if not 0 <= row < len(self._toc_flat):
             return
         entry, section = self._toc_flat[row]
         fragment = entry.href.partition("#")[2] if "#" in entry.href else ""
+        # No signal of its own: `goToSection` republishes the window, which emits
+        # `tocChanged` too - the highlight of the current row is what has to move.
         self.goToSection(section, fragment)
-        self._toc_visible = False
-        self.layoutChanged.emit()
+
+    @Slot(int)
+    def goToOutlineRow(self, row: int) -> None:
+        """Jump to a heading of the current section (FR-018).
+
+        Uses the offset the row was built with, which is exact for the layout it was
+        built for - and the anchor is a heading, so the window lands with that
+        heading at its top rather than somewhere inside the paragraph under it.
+
+        Like the table of contents the panel stays open: it is a map you click
+        through several times in a row, and it has a column of its own rather than
+        covering the text.
+        """
+        items = self._outline()
+        if not 0 <= row < len(items):
+            return
+        offset = items[row]["offset"]
+        if not isinstance(offset, (int, float)):
+            return
+        self._set_offset(float(offset))
 
     @Slot()
     def toggleToc(self) -> None:
+        """Show or hide the table of contents - the left column, and nothing else.
+
+        A panel only steps aside for the panel it competes with for room.  The table
+        of contents is on the left and has no rival there, so it no longer closes the
+        settings drawer, and the drawer no longer closes it: pressing `S` used to
+        take the map off the screen, which broke "the contents is always there"
+        (FR-013) as soon as a reader changed the type size.
+        """
         self._toc_visible = not self._toc_visible
-        if self._toc_visible:
+        self.layoutChanged.emit()
+
+    @Slot()
+    def toggleOutline(self) -> None:
+        """Show or hide the outline column (FR-019).
+
+        Stays shut when there is nothing to fill it with, so the shortcut cannot
+        open an empty column.
+        """
+        if not self._outline_visible and not self._get_outline_available():
+            return
+        self._outline_visible = not self._outline_visible
+        if self._outline_visible:
             self._settings_visible = False
         self.layoutChanged.emit()
 
     @Slot()
     def toggleSettings(self) -> None:
+        """Show or hide the settings drawer.
+
+        The drawer floats over the right-hand side, so the one column it yields is
+        the outline - the column it shares that side with.  The table of contents is
+        on the other side of the text and stays where it is (FR-013).
+        """
         self._settings_visible = not self._settings_visible
         if self._settings_visible:
-            self._toc_visible = False
+            self._outline_visible = False
         self.layoutChanged.emit()
 
     @Slot()
+    def closeSettings(self) -> None:
+        """Dismiss the settings drawer, leaving the columns beside the text alone.
+
+        This is what a click beside the drawer means: the reader wants the text
+        column back to itself, not for the map to disappear with the drawer.
+        """
+        if self._settings_visible:
+            self._settings_visible = False
+            self.layoutChanged.emit()
+
+    @Slot()
     def closePanels(self) -> None:
-        if self._toc_visible or self._settings_visible:
+        """Close every panel at once (``Esc``)."""
+        if self._toc_visible or self._settings_visible or self._outline_visible:
             self._toc_visible = False
             self._settings_visible = False
+            self._outline_visible = False
             self.layoutChanged.emit()
 
     # ------------------------------------------------------------- view changes
@@ -491,20 +880,73 @@ class ReaderController(QObject):
         if self._engine is None:
             return
 
-        anchor = self._current_anchor_block()
-        self._page_cache.clear()
+        anchor = self._anchor_block()
+        self._window_cache.clear()
+        self._drop_outline()
         self._engine.set_device_ratio(ratio)
-        if self._engine.set_geometry(PageGeometry.from_settings(size, self._settings)) and anchor is not None:
-            self._page_index = self._engine.section(self._section_index).block_page(anchor)
-        self._publish_page(set_section=True)
+        if self._engine.set_geometry(PageGeometry.from_settings(size, self._settings)):
+            self._restore_block(anchor)
+        self._publish_view(set_section=True)
 
-    def _current_anchor_block(self) -> int | None:
+    def _view_geometry(self) -> PageGeometry:
+        """The box the text is laid out and rendered for.
+
+        Before a book is open there is no engine yet, but QML still asks for the
+        viewport height and the page size to size itself, so the same geometry is
+        derived from the view size the window reported.
+        """
+        if self._engine is not None:
+            return self._engine.geometry
+        return PageGeometry.from_settings(self._view_size, self._settings)
+
+    def _current_section(self) -> LaidOutSection | None:
+        """The laid-out current section, or ``None`` when there is nothing to show."""
         if self._engine is None:
             return None
         try:
-            return self._engine.section(self._section_index).page_start_block(self._page_index)
+            return self._engine.section(self._section_index)
         except (BookError, IndexError):
             return None
+
+    def _anchor_block(self) -> int | None:
+        """Block at the top of the window: the place to come back to (ADR-011)."""
+        section = self._current_section()
+        if section is None:
+            return None
+        return section.block_at_offset(self._scroll_offset)
+
+    def _restore_block(self, block: int | None) -> None:
+        """Put the window back on *block* after the text was laid out again."""
+        section = self._current_section()
+        if section is None or block is None:
+            return
+        self._scroll_offset = section.block_offset(block)
+
+    def _drop_outline(self) -> None:
+        """Forget the outline rows; the layout moved, so their offsets are stale."""
+        self._outline_key = None
+
+    def _outline(self) -> list[dict[str, object]]:
+        """Rows for the outline panel (FR-018).
+
+        Memoised because one scroll step asks two or three times - the panel's model,
+        the window's availability check and the highlight - and the rows carry
+        offsets, so they only hold for one layout.  Rebuilding is cheap either way:
+        0.8 ms for a 49-row outline over a 445-block section.
+        """
+        section = self._current_section()
+        if section is None or self._book is None:
+            return []
+        key = (
+            self._book.path,
+            self._section_index,
+            len(section.blocks),
+            round(section.height, 1),
+        )
+        if self._outline_key != key:
+            self._outline_cache = _build_outline(section)
+            self._outline_key = key
+        return self._outline_cache
 
     # --------------------------------------------------------- settings actions
 
@@ -518,12 +960,13 @@ class ReaderController(QObject):
         if needs_reparse and self._book is not None:
             # kinsoku is baked into the parsed text, so the block cache must go.
             self._book.drop_blocks_cache()
-        anchor = self._current_anchor_block()
-        self._page_cache.clear()
-        if self._engine.set_settings(self._settings) and anchor is not None:
-            self._page_index = self._engine.section(self._section_index).block_page(anchor)
+        anchor = self._anchor_block()
+        self._window_cache.clear()
+        self._drop_outline()
+        if self._engine.set_settings(self._settings):
+            self._restore_block(anchor)
         self.settingsChanged.emit()
-        self._publish_page(set_section=True)
+        self._publish_view(set_section=True)
 
     @Slot(float)
     def setFontSize(self, size: float) -> None:
@@ -607,54 +1050,68 @@ class ReaderController(QObject):
 
     # --------------------------------------------------------------- bookkeeping
 
-    def _section_page_count(self) -> int:
-        if self._engine is None:
-            return 0
-        try:
-            return self._engine.section(self._section_index).page_count
-        except (BookError, IndexError):
-            return 0
-
     def _overall_percent(self) -> float:
-        """Progress across the whole book, weighted by page counts.
+        """Progress across the whole book, weighted by section height.
 
         Only the current and the first section are measured: laying the whole book
-        out just to draw a progress bar would defeat lazy layout (ADR-003).
+        out just to draw a progress bar would defeat lazy layout (ADR-003).  The two
+        measured heights are a poor average for a book whose chapters differ by a
+        factor of forty, which is why the status bar shows it as an estimate beside
+        the current section's own, exact percentage (FR-072).
         """
         if self._engine is None or self._book is None or self._book.section_count == 0:
             return 0.0
         sections = self._book.section_count
-        measured = [self._engine.section(i).page_count for i in {0, self._section_index}]
-        average = sum(measured) / len(measured)
-        done = self._section_index * average + self._page_index
-        return max(0.0, min(100.0, done / max(1.0, average * sections) * 100.0))
+        measured = [self._engine.section(i).height for i in {0, self._section_index}]
+        average = max(1.0, sum(measured) / len(measured))
+        done = self._section_index * average + self._scroll_offset
+        return max(0.0, min(100.0, done / (average * sections) * 100.0))
 
-    def _publish_page(self, *, set_section: bool = False) -> None:
+    def _publish_view(self, *, set_section: bool = False) -> None:
         if self._engine is not None:
             stats = self._engine.last_stats
             self._last_section_ms = stats.build_ms if stats else 0.0
-            self._engine.prefetch(self._section_index, self._page_index + 1)
-        self.pageChanged.emit()
+            self._engine.prefetch(self._section_index, self._scroll_offset)
+        self.viewChanged.emit()
         if set_section:
             self.tocChanged.emit()
         self._save_state()
 
     def _save_state(self) -> None:
+        """Remember the resume point: opening block plus a fraction of its height."""
         if self._book is None or self._engine is None:
             return
-        try:
-            section = self._engine.section(self._section_index)
-        except (BookError, IndexError):
+        section = self._current_section()
+        if section is None:
             return
         self._store.set_book_state(
             self._book.path,
             BookState(
                 section=self._section_index,
-                block=section.page_start_block(self._page_index),
+                block=section.block_at_offset(self._scroll_offset),
+                char_offset=self._fraction_within_block(section),
                 opened_at=time.time(),
             ),
         )
         self._store.save()
+
+    def _fraction_within_block(self, section: LaidOutSection) -> int:
+        """How far into its opening block the window starts, in per mille.
+
+        ``char_offset`` is the field the resume triple has always had (ADR-011) and
+        a fraction of the block's height is what it now holds.  A distance is the
+        right second coordinate for a continuous column: the reader can stop with a
+        900 px figure filling the window, where no character of the block it belongs
+        to is on screen at all, and a character index would have nothing to point
+        at.  A fraction means the same thing inside the same paragraph whatever the
+        type size is.
+        """
+        index = section.block_at_offset(self._scroll_offset)
+        top = section.block_offset(index)
+        height = section.block_height(index)
+        if height <= 0.0:
+            return 0
+        return max(0, min(1000, round((self._scroll_offset - top) / height * 1000.0)))
 
     @Slot(int, int)
     def saveWindow(self, width: int, height: int) -> None:

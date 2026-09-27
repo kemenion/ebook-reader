@@ -1,11 +1,17 @@
-"""Typesetting layer: block model to paginated, rasterised pages.
+"""Typesetting layer: block model to continuously laid-out, rasterised windows.
 
 This is the only layer besides ``app`` that may import QtGui.
 """
 
 from __future__ import annotations
 
-from .engine import LayoutEngine, LaidOutSection
+from .engine import (
+    DEFAULT_SECTION_CACHE,
+    WINDOW_QUANTUM,
+    LaidOutSection,
+    LayoutEngine,
+    quantise_offset,
+)
 from .images import ImageCache
 from .settings import (
     FontChoice,
@@ -16,6 +22,7 @@ from .settings import (
 )
 
 __all__ = [
+    "DEFAULT_SECTION_CACHE",
     "FontChoice",
     "ImageCache",
     "LaidOutSection",
@@ -24,4 +31,6 @@ __all__ = [
     "Theme",
     "ThemeColors",
     "TypographySettings",
+    "WINDOW_QUANTUM",
+    "quantise_offset",
 ]

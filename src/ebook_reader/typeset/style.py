@@ -12,7 +12,7 @@ blocks whose text is spread over thousands of inline runs, and building a fresh
 from __future__ import annotations
 
 from PySide6.QtCore import QSizeF, Qt
-from PySide6.QtGui import QFont, QTextBlockFormat, QTextCharFormat, QTextImageFormat
+from PySide6.QtGui import QFont, QFontMetricsF, QTextBlockFormat, QTextCharFormat, QTextImageFormat
 
 from ..domain.models import Block, BlockAlign, BlockKind, Span
 from .settings import TypographySettings
@@ -74,6 +74,15 @@ class StyleSet:
             )
             self._font_cache[pixel_size] = font
         return font
+
+    def line_step(self) -> float:
+        """Height of one line of body text, in logical pixels.
+
+        ``ProportionalHeight`` multiplies the font's own height, so this is the
+        same arithmetic the layout performs - the reader scrolls by one line, not
+        by a guess at what one line is worth (FR-073).
+        """
+        return QFontMetricsF(self.base_font()).height() * float(self.settings.line_height)
 
     # ----------------------------------------------------------- char formats
 

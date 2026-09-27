@@ -25,31 +25,65 @@ ApplicationWindow {
     readonly property color cAccent: ctl ? ctl.accentColor : "#cfe1ff"
     readonly property bool cTocOpen: ctl ? ctl.tocVisible : false
     readonly property bool cSettingsOpen: ctl ? ctl.settingsVisible : false
+    readonly property bool cOutlineOpen: ctl ? ctl.outlineVisible : false
+    // The controller keeps the outline toggled on across a book change, but an
+    // empty column is worse than no column, so it only counts as open while the
+    // current section has something to put in it (FR-019).
+    readonly property bool cOutlineShown: cOutlineOpen && (ctl ? ctl.outlineAvailable : false)
+
+    // The table of contents and the outline take real space beside the page;
+    // settings is still a drawer that floats over it.
+    readonly property int openColumns: (cTocOpen ? 1 : 0) + (cOutlineShown ? 1 : 0)
+    readonly property real sidePanelWidth:
+        Math.max(200, Math.min(320, (width - 440) / Math.max(1, openColumns)))
+    // One definition of the text column's width, used both by the item that shows
+    // the page and by the page box handed to Python, so the two cannot drift apart.
+    readonly property real pageColumnWidth:
+        Math.max(120, width - (cTocOpen ? sidePanelWidth : 0)
+                        - (cOutlineShown ? sidePanelWidth : 0))
 
     visible: true
-    width: 1000
+    width: 1400
     height: 1380
-    minimumWidth: 520
+    minimumWidth: 720
     minimumHeight: 560
     title: cTitle
     color: cBg
 
-    // Pagination follows the reading area, not the window: the status bar is not
-    // part of the page.  The side panels float *above* the page rather than
-    // shrinking it, so opening the table of contents does not change the page box
-    // and therefore triggers no re-layout at all.
-   
+    // Pagination follows the text column, not the window: the status bar is not
+    // part of the page and neither are the side panels.  A panel therefore does
+    // change the page box, and the section is laid out again - that is the price of
+    // the text keeping its full width when a panel is beside it rather than under
+    // it, and the reader's place survives it because it is kept as a block index
+    // (ADR-011).
+
     function reportSize() {
         // Called from Component.onCompleted, i.e. before Python injects the
         // controller, so it has to tolerate being called that early.
         if (!ctl) { return }
-        ctl.setViewSize(Math.round(width), Math.round(height - statusBar.height),
+        ctl.setViewSize(Math.round(pageColumnWidth),
+                        Math.round(height - statusBar.height),
                         window.screen ? window.screen.devicePixelRatio : 1.0)
     }
 
     onWidthChanged: resizeTimer.restart()
     onHeightChanged: resizeTimer.restart()
+
+    // A panel opening or closing is a single discrete event, so it does not need
+    // the debounce the timer exists to provide for the stream a resize drag makes.
+    // It does need deferring to the next event loop turn, though: this handler runs
+    // in the middle of the change cascade, before the derived column widths have
+    // been recomputed, so reading them here would size the page for the layout that
+    // is on its way out.
+    onCTocOpenChanged: Qt.callLater(function () { window.reportSize() })
+    onCOutlineShownChanged: Qt.callLater(function () { window.reportSize() })
+
     onClosing: ctl.saveWindow(width, height)
+
+    function toggleFullScreen() {
+        if (window.visibility === Window.FullScreen) { window.showNormal() }
+        else { window.showFullScreen() }
+    }
 
     Timer {
         id: resizeTimer
@@ -58,6 +92,35 @@ ApplicationWindow {
     }
 
     Component.onCompleted: window.reportSize()
+
+    // ------------------------------------------------------------- right-click
+
+    // One right-click surface for the whole window (FR-071).  It is declared *first*,
+    // which puts it underneath the page and the panels, and that is the point: a
+    // MouseArea only takes the buttons it lists, so a right press that nothing above
+    // wants falls through the whole stack and lands here - over the text, over a
+    // panel, over the status bar - while the left button is accepted higher up, by
+    // the page's click zones (FR-062) and the panel rows, and never reaches this
+    // layer.  Bottom rather than top, so that nothing loses a right-click it may
+    // want: this layer only ever gets what is left over.  Scroll gestures are
+    // explicitly left alone, or two-finger scrolling would be taken from the page
+    // (FR-063).
+    MouseArea {
+        id: contextArea
+        objectName: "contextArea"
+        anchors.fill: parent
+        acceptedButtons: Qt.RightButton
+        scrollGestureEnabled: false
+        onPressed: function (mouse) { contextMenu.popup(mouse.x, mouse.y) }
+    }
+
+    ReaderMenu {
+        id: contextMenu
+        ctl: window.ctl
+        fullScreen: window.visibility === Window.FullScreen
+        onOpenFileRequested: fileDialog.open()
+        onToggleFullScreenRequested: window.toggleFullScreen()
+    }
 
     // ---------------------------------------------------------------- reading
 
@@ -69,71 +132,145 @@ ApplicationWindow {
         anchors.bottom: statusBar.top
         clip: true
 
+        // The text column.  Panels are siblings of this item, not overlays on it,
+        // so this is the rectangle the text is set for and the rectangle the wheel
+        // covers: a wheel over a panel never scrolls the text, and scrolling never
+        // depends on where a panel happens to be drawn.
         Rectangle {
-            anchors.fill: parent
+            id: pageArea
+            // Named for the layout test, which checks that the three columns tile
+            // the window exactly.
+            objectName: "pageArea"
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            x: cTocOpen ? sidePanelWidth : 0
+            width: window.pageColumnWidth
             color: cBg
-        }
+            // While the debounce runs the image is still the old, wider one; the
+            // PageItem letterboxes it, but clipping keeps the panel edge clean.
+            clip: true
 
-        PageView {
-            id: pageView
-            anchors.fill: parent
-            ctl: window.ctl
-        }
-
-        // Click zones: forward on the right half, back on the left (FR-062).
-        MouseArea {
-            anchors.left: parent.left
-            anchors.right: parent.horizontalCenter
-            anchors.top: parent.top
-            anchors.bottom: parent.bottom
-            acceptedButtons: Qt.LeftButton
-            onClicked: ctl && ctl.previousPage()
-        }
-
-        MouseArea {
-            anchors.left: parent.horizontalCenter
-            anchors.right: parent.right
-            anchors.top: parent.top
-            anchors.bottom: parent.bottom
-            acceptedButtons: Qt.LeftButton
-            onClicked: ctl && ctl.nextPage()
-        }
-
-        WheelHandler {
-            target: null
-            onWheel: function (event) {
-                if (Math.abs(event.angleDelta.y) < 40) { return }
-                if (event.angleDelta.y < 0) { ctl && ctl.nextPage() }
-                else { ctl && ctl.previousPage() }
-            }
-        }
-
-        // Clicking beside an open panel closes it, like a drawer.
-        Rectangle {
-            anchors.fill: parent
-            visible: cTocOpen || cSettingsOpen
-            color: "transparent"
-            MouseArea {
+            ReadingView {
+                id: readingView
                 anchors.fill: parent
-                onClicked: ctl && ctl.closePanels()
+                ctl: window.ctl
+            }
+
+            // The wheel scrolls the text, and that is all it does - the same gesture
+            // a long web page answers to.  There is no click-to-turn-page any more:
+            // with a continuous column, half-screens and page-sized jumps are
+            // guesses at a unit that no longer exists (FR-073).
+            WheelHandler {
+                target: null
+                onWheel: function (event) {
+                    if (!ctl) { return }
+                    // One notch is 120 units and three lines is what every desktop
+                    // browser makes of it; a smooth trackpad sends smaller deltas
+                    // and gets proportionally smaller moves.
+                    ctl.scrollBy(-event.angleDelta.y / 120.0 * ctl.wheelStep)
+                    event.accepted = true
+                }
+            }
+
+            // The scroll bar (FR-076).  Drawn over the right margin rather than
+            // beside the text, so its appearance never changes the page box - a
+            // relayout every time the bar shows up would be absurd.
+            Item {
+                id: scrollBar
+                objectName: "scrollBar"
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                anchors.right: parent.right
+                width: 14
+                visible: ctl && ctl.hasBook && ctl.scrollMax > 1
+
+                // One handle height per screenful of text, so the bar says how long
+                // the chapter is as well as where the reader is in it.
+                readonly property real handleHeight:
+                    Math.max(30, height * (ctl && ctl.contentHeight > 0
+                                           ? Math.min(1.0, ctl.viewportHeight / ctl.contentHeight)
+                                           : 1.0))
+                readonly property real usable: Math.max(1, height - handleHeight)
+
+                function fractionFor(y) {
+                    return (y - handleHeight / 2) / usable
+                }
+
+                Rectangle {
+                    id: scrollHandle
+                    objectName: "scrollHandle"
+                    x: 4
+                    width: parent.width - 8
+                    radius: width / 2
+                    color: ctl ? ctl.mutedColor : "#8a8a8a"
+                    opacity: dragArea.pressed ? 0.9 : 0.45
+                    height: parent.handleHeight
+                    y: ctl && ctl.scrollMax > 0
+                       ? (ctl.scrollOffset / ctl.scrollMax) * parent.usable
+                       : 0
+                }
+
+                MouseArea {
+                    id: dragArea
+                    anchors.fill: parent
+                    onPressed: function (mouse) { if (ctl) { ctl.scrollToFraction(scrollBar.fractionFor(mouse.y)) } }
+                    onPositionChanged: function (mouse) {
+                        if (pressed && ctl) { ctl.scrollToFraction(scrollBar.fractionFor(mouse.y)) }
+                    }
+                }
+            }
+
+            // Settings is the one panel that still floats over the text, so
+            // clicking beside it closes it like a drawer - and only it: the
+            // columns beside the text stay where they are, because a click beside
+            // the drawer is not a request to put the map away.
+            Rectangle {
+                objectName: "settingsShield"
+                anchors.fill: parent
+                visible: cSettingsOpen
+                color: "transparent"
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: ctl && ctl.closeSettings()
+                }
             }
         }
 
         TocSidebar {
             id: tocPanel
+            objectName: "tocPanel"
             // Only the vertical edges are anchored: setting an anchor *and* an
             // explicit x on the same axis silently discards the x, which made the
-            // panel permanently visible and its slide animation a no-op.
+            // panel permanently visible.  The width comes from here rather than from
+            // the component, because it depends on how many columns are open.
             anchors.top: parent.top
             anchors.bottom: parent.bottom
+            width: window.sidePanelWidth
             ctl: window.ctl
-            x: cTocOpen ? 0 : -width
-            Behavior on x { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
-            onXChanged: if (cTocOpen && Math.abs(x) < 1) revealCurrent()
+            x: 0
+            visible: cTocOpen
+            onVisibleChanged: if (visible) revealCurrent()
+        }
+
+        OutlinePanel {
+            id: outlinePanel
+            objectName: "outlinePanel"
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            width: window.sidePanelWidth
+            ctl: window.ctl
+            x: parent.width - width
+            visible: cOutlineShown
+            onVisibleChanged: if (visible) revealCurrent()
         }
 
         SettingsPanel {
             id: settingsPanel
+            objectName: "settingsPanel"
+            // Still a drawer: it keeps its own fixed width and slides over the text
+            // column instead of taking a column of its own, which is also why it is
+            // the only panel that keeps an animation - nothing has to move in step
+            // with it.
             anchors.top: parent.top
             anchors.bottom: parent.bottom
             ctl: window.ctl
@@ -192,27 +329,34 @@ ApplicationWindow {
 
     // --------------------------------------------------------------- shortcuts
 
-    Shortcut { sequences: ["Right", "PageDown", "Space", "Down"]
-               onActivated: ctl && ctl.nextPage() }
-    Shortcut { sequences: ["Left", "PageUp", "Backspace", "Up"]
-               onActivated: ctl && ctl.previousPage() }
-    Shortcut { sequence: "Home"; onActivated: ctl && ctl.firstPage() }
-    Shortcut { sequence: "End"; onActivated: ctl && ctl.lastPage() }
-    Shortcut { sequence: "BracketRight"; onActivated: ctl && ctl.nextSection() }
-    Shortcut { sequence: "BracketLeft"; onActivated: ctl && ctl.previousSection() }
+    // Scrolling, browser-style: one line per arrow key, one screen per page key,
+    // the ends of the chapter on Home and End (FR-073).
+    //
+    // The sequences are spelled the way ``QKeySequence`` parses them, which is also
+    // the way the menu's hint column writes them: "PgDown", not "PageDown", and "]"
+    // rather than the C++ enumeration name "BracketRight".  A sequence Qt cannot
+    // parse is silently never registered - the key simply does nothing - so these
+    // spellings are load-bearing, and `test_scroll_view.py` presses each one.
+    Shortcut { sequence: "Down"; onActivated: ctl && ctl.scrollDown() }
+    Shortcut { sequence: "Up"; onActivated: ctl && ctl.scrollUp() }
+    Shortcut { sequences: ["PgDown", "Space", "Right"]
+               onActivated: ctl && ctl.scrollPageDown() }
+    Shortcut { sequences: ["PgUp", "Backspace", "Left"]
+               onActivated: ctl && ctl.scrollPageUp() }
+    Shortcut { sequence: "Home"; onActivated: ctl && ctl.scrollToTop() }
+    Shortcut { sequence: "End"; onActivated: ctl && ctl.scrollToBottom() }
+    Shortcut { sequence: "]"; onActivated: ctl && ctl.nextSection() }
+    Shortcut { sequence: "["; onActivated: ctl && ctl.previousSection() }
     Shortcut { sequence: "T"; onActivated: ctl && ctl.toggleToc() }
+    Shortcut { sequence: "O"; onActivated: ctl && ctl.toggleOutline() }
     Shortcut { sequence: "S"; onActivated: ctl && ctl.toggleSettings() }
     Shortcut { sequence: "Escape"; onActivated: ctl && ctl.closePanels() }
-    Shortcut { sequence: "StandardKey.Open"; onActivated: fileDialog.open() }
-    Shortcut { sequence: "StandardKey.Quit"; onActivated: Qt.quit() }
+    Shortcut { sequence: "Ctrl+O"; onActivated: fileDialog.open() }
+    Shortcut { sequence: "Ctrl+Q"; onActivated: Qt.quit() }
     Shortcut { sequence: "Ctrl++"; onActivated: ctl && ctl.increaseFont() }
     Shortcut { sequence: "Ctrl+="; onActivated: ctl && ctl.increaseFont() }
     Shortcut { sequence: "Ctrl+-"; onActivated: ctl && ctl.decreaseFont() }
-    Shortcut {
-        sequence: "F11"
-        onActivated: window.visibility === Window.FullScreen
-                     ? window.showNormal() : window.showFullScreen()
-    }
+    Shortcut { sequence: "F11"; onActivated: window.toggleFullScreen() }
 
     FileDialog {
         id: fileDialog

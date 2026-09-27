@@ -3,6 +3,14 @@
 These are the tests that decide whether the architecture works at all: they assert
 the measured numbers from the design document, not just functional behaviour.  All
 of them run headless via ``QT_QPA_PLATFORM=offscreen``.
+
+A section is one continuous column and one *window* of it is the unit that gets
+rasterised - the page box plus one rendering quantum of headroom (ADR-016) - so where
+the paged version of this module asked about pages, this one asks about the column:
+how tall it came out, which block a distance lands in, and what a window at that
+distance contains.  The two guarantees that only made sense against a page boundary
+(ADR-007) are kept in the form the column gives them: a figure is never squeezed or
+overlapped by the layout, and nothing is inserted between a heading and its text.
 """
 
 from __future__ import annotations
@@ -13,9 +21,15 @@ import pytest
 from PySide6.QtCore import QSizeF
 
 from ebook_reader.domain.html.kinsoku import NO_LINE_START, NO_LINE_START_ASCII
-from ebook_reader.typeset import LayoutEngine, TypographySettings
+from ebook_reader.typeset import (
+    WINDOW_QUANTUM,
+    LayoutEngine,
+    TypographySettings,
+    quantise_offset,
+)
 from ebook_reader.typeset.images import ImageCache
 from ebook_reader.typeset.settings import PageGeometry
+from ebook_reader.typeset.style import StyleSet
 
 PAGE = QSizeF(1000.0, 1346.0)
 
@@ -25,8 +39,21 @@ PAGE = QSizeF(1000.0, 1346.0)
 #: budget is asserted on the steady state.
 SECTION_BUDGET_MS = 50.0
 
-#: NFR-004: 15 ms target / 20 ms floor for rasterising one page.
-PAGE_BUDGET_MS = 20.0
+#: NFR-004: 15 ms target / 20 ms floor for rasterising one window.
+WINDOW_BUDGET_MS = 20.0
+
+#: How many windows the render budget is measured over, one viewport apart.
+WINDOWS_MEASURED = 8
+
+#: Room the style set may leave between a heading and the text under it, in line
+#: steps.  Two is generous - the measured worst case over the reference book is 1.45,
+#: which is the heading's own bottom margin - while a page break used to leave up to
+#: a page.
+HEADING_GAP_LINE_STEPS = 2.0
+
+#: A figure's rect inside the column is the display size the style set asked for;
+#: half a pixel of rounding is Qt's (measured), not a difference in room.
+FIGURE_SIZE_TOLERANCE = 1.0
 
 
 @pytest.fixture
@@ -64,104 +91,169 @@ def test_page_geometry_deducts_margins(
 def test_section_build_stays_within_budget(
     engine: LayoutEngine, largest_section: int
 ) -> None:
-    """Warm the glyph caches the way opening a book does, then measure."""
+    """Warm the glyph caches the way opening a book does, then measure.
+
+    The column is checked to be a long one first, because the budget only means
+    something if the section really is the worst case it claims to be: the reference
+    book's largest section comes out at thirty screens of text (measured), and a
+    section that fits on one screen would pass whatever the code did.
+    """
     engine.section(0)
     engine.section(largest_section)
 
     engine.clear()
     section, elapsed = _timed(lambda: engine.section(largest_section))
-    assert section.page_count >= 2
+    assert section.height > 2.0 * section.geometry.content_height
     assert elapsed < SECTION_BUDGET_MS, f"section took {elapsed:.1f} ms"
 
 
-def test_page_rendering_stays_within_budget(engine: LayoutEngine, largest_section: int) -> None:
+def test_window_rendering_stays_within_budget(engine: LayoutEngine, largest_section: int) -> None:
+    """The unit of rasterisation is a window of the column, one viewport apart.
+
+    Every window costs the same as any other one: what used to be "render page n" is
+    now "render what is on screen at this distance down the column".
+    """
     section = engine.section(largest_section)
-    engine.render(largest_section, 0)  # warm the first paint
+    engine.render_window(largest_section, 0.0)  # warm the first paint
 
     worst = 0.0
-    for page in range(min(8, section.page_count)):
-        image, elapsed = _timed(lambda page=page: engine.render(largest_section, page))
+    for index in range(WINDOWS_MEASURED):
+        offset = min(
+            quantise_offset(index * section.geometry.content_height), section.max_offset
+        )
+        image, elapsed = _timed(
+            lambda offset=offset: engine.render_window(largest_section, offset)
+        )
         assert not image.isNull()
         worst = max(worst, elapsed)
-    assert worst < PAGE_BUDGET_MS, f"slowest page took {worst:.1f} ms"
+    assert worst < WINDOW_BUDGET_MS, f"slowest window took {worst:.1f} ms"
 
 
-def test_rendered_page_has_the_expected_geometry(engine: LayoutEngine, largest_section: int) -> None:
-    image = engine.render(largest_section, 0)
+def test_rendered_window_has_the_expected_geometry(
+    engine: LayoutEngine, largest_section: int
+) -> None:
+    """A window is the page box plus one quantum of headroom (ADR-016, NFR-005).
+
+    The extra strip is what makes scrolling inside a quantum a bitmap translate
+    rather than a repaint, so its height is part of the contract, not an accident.
+    """
+    image = engine.render_window(largest_section, 0.0)
     assert image.width() == round(PAGE.width())
-    assert image.height() == round(PAGE.height())
+    assert image.height() == round(PAGE.height() + WINDOW_QUANTUM)
 
 
-def test_rendered_page_contains_ink(engine: LayoutEngine, largest_section: int) -> None:
-    """Guards against the silent failure mode of drawing nothing at all."""
-    image = engine.render(largest_section, 0)
-    dark = sum(
-        1
-        for y in range(0, image.height(), 11)
-        for x in range(0, image.width(), 11)
-        if image.pixelColor(x, y).lightness() < 200
-    )
-    assert dark > 100, f"page looks blank ({dark} dark samples)"
+def test_rendered_window_contains_ink(engine: LayoutEngine, largest_section: int) -> None:
+    """Guards against the silent failure mode of drawing nothing at all.
+
+    Checked at three distances: the top of the column, one viewport down, and the
+    deepest offset the section allows - the last window is the one an off-by-one in
+    the offset clamp would leave blank.
+    """
+    section = engine.section(largest_section)
+    offsets = (0.0, quantise_offset(section.geometry.content_height), section.max_offset)
+    for offset in offsets:
+        image = engine.render_window(largest_section, offset)
+        dark = sum(
+            1
+            for y in range(0, image.height(), 11)
+            for x in range(0, image.width(), 11)
+            if image.pixelColor(x, y).lightness() < 200
+        )
+        assert dark > 100, f"window at {offset:.1f} looks blank ({dark} dark samples)"
 
 
 def test_device_ratio_scales_the_bitmap(engine: LayoutEngine, largest_section: int) -> None:
     engine.set_device_ratio(2.0)
-    image = engine.render(largest_section, 0)
+    image = engine.render_window(largest_section, 0.0)
     assert image.width() == round(PAGE.width() * 2)
+    assert image.height() == round((PAGE.height() + WINDOW_QUANTUM) * 2)
     assert image.devicePixelRatio() == pytest.approx(2.0)
 
 
-def test_no_image_block_is_split_across_a_page_boundary(engine: LayoutEngine, kangpo) -> None:
-    """FR-052 / ADR-007: pages may be short, but a figure is never cut in half."""
-    split = 0
+def test_no_figure_is_squeezed_or_overlapped_by_the_column(
+    engine: LayoutEngine, kangpo
+) -> None:
+    """FR-052 in column coordinates: a figure gets exactly the room it asked for.
+
+    The page-boundary form of the guarantee went with paging itself (ADR-016): over a
+    continuous column there is no boundary for a figure to be split across.  What can
+    still go wrong is the figure being clipped by the layout, or given filler room it
+    does not fill - which is precisely what the page-break repair used to do - so the
+    assertion is that a figure's rect in the column is the display size the style set
+    chose, and that the block after it starts where the figure ends.
+    """
+    style = StyleSet(engine.settings, engine.geometry.content_size)
     checked = 0
     for index in range(kangpo.section_count):
         section = engine.section(index)
-        if not any(block.is_image for block in section.blocks):
-            continue
-        height = section.geometry.content_height
         layout = section.document.documentLayout()
         for block_index, block in enumerate(section.blocks):
             if not block.is_image:
                 continue
             checked += 1
             rect = layout.blockBoundingRect(section.document.findBlockByNumber(block_index))
-            first = int(rect.top() // height)
-            last = int(max(rect.top(), rect.bottom() - 0.5) // height)
-            if first != last:
-                split += 1
+            assert rect.height() == pytest.approx(
+                style.image_size_for(block).height(), abs=FIGURE_SIZE_TOLERANCE
+            ), f"figure {index}/{block_index} is {rect.height():.1f}px tall"
+            following = section.document.findBlockByNumber(block_index + 1)
+            if following.isValid():
+                assert (
+                    layout.blockBoundingRect(following).top()
+                    >= rect.bottom() - FIGURE_SIZE_TOLERANCE
+                ), f"text overlaps figure {index}/{block_index}"
     assert checked > 100, "expected the reference book to contain many figures"
-    assert split == 0
 
 
-def test_headings_are_not_left_alone_at_the_bottom_of_a_page(
-    engine: LayoutEngine, kangpo
-) -> None:
-    """FR-053: a heading must not be the last thing on a page."""
-    height = engine.geometry.content_height
-    orphans = 0
+def test_a_heading_has_its_text_right_below_it(engine: LayoutEngine, kangpo) -> None:
+    """FR-053 in column coordinates: nothing is inserted after a heading.
+
+    Over a column there is no bottom of a page for a heading to be orphaned on, and
+    the pass that used to break before one is gone (ADR-016).  Its absence is
+    observable: the gap between a heading and the block that follows it is the
+    ordinary spacing the style set asks for - the heading's own bottom margin, a
+    little over one body line (measured) - and not the rest of a page.
+    """
+    step = engine.line_step
+    checked = 0
     for index in range(kangpo.section_count):
         section = engine.section(index)
         layout = section.document.documentLayout()
         for block_index, block in enumerate(section.blocks):
             if not block.is_heading or block_index + 1 >= len(section.blocks):
                 continue
+            checked += 1
             here = layout.blockBoundingRect(section.document.findBlockByNumber(block_index))
             following = layout.blockBoundingRect(
                 section.document.findBlockByNumber(block_index + 1)
             )
-            if int(following.top() // height) > int(here.top() // height):
-                orphans += 1
-    assert orphans == 0
+            gap = following.top() - here.bottom()
+            assert -0.5 <= gap < HEADING_GAP_LINE_STEPS * step, (
+                f"heading {index}/{block_index} is followed by a {gap / step:.1f} line gap"
+            )
+    assert checked > 20, f"expected many headings with text, saw {checked}"
 
 
-def test_page_break_repair_converges(engine: LayoutEngine, kangpo) -> None:
-    """The iteration cap must never be reached in practice."""
+def test_the_column_height_is_one_layout_pass_and_reproducible(
+    engine: LayoutEngine, kangpo
+) -> None:
+    """ADR-016: the height is Qt's own answer for one column, not a repaired total.
+
+    Paging ran a repair loop that pushed blocks off page boundaries and reported how
+    many iterations it took (ADR-007).  No such pass exists any more, so the claim
+    worth pinning is that the reported height is the height the document itself came
+    out at - and that laying the same column out twice gives the same number, which is
+    what lets an offset be remembered as a reading position.
+    """
     for index in range(kangpo.section_count):
         section = engine.section(index)
-        assert section.repair.converged, index
-        assert section.repair.iterations <= 8
-    assert engine.last_stats is not None
+        assert section.height == pytest.approx(section.document.size().height(), abs=0.5)
+        assert section.build_ms >= 0.0
+
+    first = engine.section(0)
+    engine.clear()
+    rebuilt = engine.section(0)
+    assert rebuilt.height == pytest.approx(first.height, abs=0.1)
+    assert rebuilt.blocks == first.blocks
 
 
 def test_no_forbidden_character_starts_a_line(
@@ -261,16 +353,54 @@ def test_section_cache_evicts_old_sections(qapp, kangpo, settings, geometry) -> 
 
 
 def test_reading_position_survives_a_font_size_change(qapp, kangpo, settings, geometry) -> None:
-    """ADR-011: a block-based position still addresses the same paragraph."""
+    """ADR-011: the position is a block, and the block still addresses the same text.
+
+    A reading position is a distance down the column now (ADR-016), but the block
+    index is what survives a relayout, so the promise being tested is the one the
+    reader can see: after changing the type size, the same block index is the same
+    paragraph - and it has moved a long way down the column, because the type is
+    bigger.
+    """
     engine = LayoutEngine(kangpo, settings, geometry)
     section = engine.section(11)
-    block = section.page_start_block(min(5, section.page_count - 1))
+    block = min(5, len(section.blocks) - 1)
     text = section.blocks[block].text
+    before = section.block_offset(block)
 
     assert engine.set_settings(settings.with_(font_size=24.0)) is True
     restored = engine.section(11)
     assert restored.blocks[block].text == text
-    assert 0 <= restored.block_page(block) < restored.page_count
+    assert restored.block_at_offset(restored.block_offset(block)) >= block
+    assert restored.block_offset(block) > before
+    assert 0.0 <= restored.block_offset(block) <= restored.height
+
+
+def test_the_block_lookup_is_the_last_block_at_or_before_an_offset(
+    engine: LayoutEngine, largest_section: int
+) -> None:
+    """The inverse of a reading position: a distance down the column names a block.
+
+    Two blocks can share a top (an empty one before a figure, say), so the contract
+    is "the last block that starts at or before this offset" - which is what makes
+    scrolling to a remembered offset land on the same text again.  The next block's
+    top is what proves it really is the last one.
+    """
+    section = engine.section(largest_section)
+    tops = [section.block_offset(index) for index in range(len(section.blocks))]
+    assert all(later >= earlier for earlier, later in zip(tops, tops[1:]))
+
+    step = section.geometry.content_height / 4.0
+    offset = 0.0
+    samples = 0
+    while offset <= section.max_offset:
+        index = section.block_at_offset(offset)
+        assert 0 <= index < len(section.blocks)
+        assert section.block_offset(index) <= offset + 0.01
+        if index + 1 < len(section.blocks):
+            assert section.block_offset(index + 1) > offset - 0.01
+        offset += step
+        samples += 1
+    assert samples > 8, f"only sampled {samples} offsets"
 
 
 def test_theme_change_does_not_force_relayout(engine: LayoutEngine, settings) -> None:
@@ -301,7 +431,9 @@ def test_every_section_of_both_books_can_be_laid_out(
         engine = LayoutEngine(book, settings, geometry)
         for index in range(book.section_count):
             section = engine.section(index)
-            assert section.page_count >= 1
             assert section.blocks
+            assert section.height > 0.0
+            assert section.max_offset >= 0.0
+            assert section.block_at_offset(0.0) == 0
 
 

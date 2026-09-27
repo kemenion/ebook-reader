@@ -3,12 +3,19 @@
 Responsibilities (and nothing else):
 
 * own the per-section LRU of laid-out documents (ADR-003);
-* rebuild everything when the page geometry or the typography changes;
-* answer "how many pages does section N have", "which page is block B on",
-  "give me page P of section N as an image".
+* rebuild everything when the viewport geometry or the typography changes;
+* answer "how tall is section N", "where does block B start", "which block sits at
+  distance Y", "give me the viewport at distance O as an image".
 
 Parsing stays in the domain layer, and neither the UI nor the controller needs to
 know that ``QTextDocument`` exists.
+
+A section is laid out as **one continuous column** (ADR-016): the document is set
+to the width of the text column with no height limit, Qt's pagination is never
+used, and the reading position is a distance from the top of the column.  That is
+what makes the reader scroll through a chapter the way a browser scrolls through a
+page; block offsets still come from Qt's own layout, so the mapping between a
+distance and a block index stays exact (ADR-011).
 """
 
 from __future__ import annotations
@@ -18,19 +25,26 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 
-from PySide6.QtCore import QSizeF
+from PySide6.QtCore import QRectF, QSizeF
 from PySide6.QtGui import QImage, QTextDocument
 
 from ..domain.epub.book import EpubBook
 from ..domain.models import Block
-from .document import build_document
+from .document import build_document, layout_continuous
 from .images import ImageCache, ImageCacheStats
-from .paginator import PageBreakRepair, paginate
-from .renderer import render_page
+from .renderer import WINDOW_QUANTUM, quantise_offset, render_window
 from .settings import PageGeometry, TypographySettings
 from .style import StyleSet
 
-__all__ = ["LaidOutSection", "LayoutEngine", "SectionStats", "make_geometry"]
+__all__ = [
+    "DEFAULT_SECTION_CACHE",
+    "WINDOW_QUANTUM",
+    "LaidOutSection",
+    "LayoutEngine",
+    "SectionStats",
+    "make_geometry",
+    "quantise_offset",
+]
 
 _log = logging.getLogger(__name__)
 
@@ -42,39 +56,63 @@ DEFAULT_SECTION_CACHE = 3
 
 @dataclass(slots=True)
 class LaidOutSection:
-    """One section, laid out and paginated."""
+    """One section, laid out as a single continuous column (ADR-016).
+
+    There is no page grid any more.  The document knows one height, and every
+    navigation question - which block a distance lands in, where a block starts,
+    how far the reader may scroll - is answered from the block boxes Qt computed
+    while laying the column out.  ``height`` is the height of that column.
+    """
 
     index: int
     blocks: tuple[Block, ...]
     document: QTextDocument
-    page_count: int
+    height: float
     geometry: PageGeometry
-    repair: PageBreakRepair
     build_ms: float
     anchor_blocks: dict[str, int] = field(default_factory=dict)
     _block_tops: list[float] | None = None
+    _block_heights: list[float] | None = None
 
     # ------------------------------------------------------------- navigation
 
-    def block_page(self, block_index: int) -> int:
-        """Page that contains *block_index*, clamped to the section."""
-        tops = self._ensure_tops()
-        if not tops:
-            return 0
-        block_index = max(0, min(block_index, len(tops) - 1))
-        page = int(tops[block_index] // max(1.0, self.geometry.content_height))
-        return max(0, min(page, self.page_count - 1))
+    @property
+    def max_offset(self) -> float:
+        """Furthest the viewport may scroll and still show text.
 
-    def page_start_block(self, page_index: int) -> int:
-        """Index of the last block that starts at or before *page_index*."""
+        Past this point scrolling would only drag the last line up out of the
+        content box and leave blank margin behind, which is not what "the end of
+        the chapter" means to a reader.  A section shorter than one viewport never
+        scrolls at all.
+        """
+        return max(0.0, self.height - self.geometry.content_height)
+
+    def block_offset(self, block_index: int) -> float:
+        """Distance from the top of the column to *block_index*."""
+        tops = self._ensure_tops()
+        if not tops:
+            return 0.0
+        block_index = max(0, min(block_index, len(tops) - 1))
+        return max(0.0, min(tops[block_index], self.max_offset))
+
+    def block_height(self, block_index: int) -> float:
+        """Height of one block; the second coordinate of a resume point."""
+        self._ensure_tops()
+        heights = self._block_heights or []
+        if not heights:
+            return 0.0
+        block_index = max(0, min(block_index, len(heights) - 1))
+        return max(0.0, heights[block_index])
+
+    def block_at_offset(self, offset: float) -> int:
+        """Index of the last block that starts at or before *offset*."""
         tops = self._ensure_tops()
         if not tops:
             return 0
-        target = page_index * max(1.0, self.geometry.content_height)
         low, high, result = 0, len(tops) - 1, 0
         while low <= high:
             middle = (low + high) // 2
-            if tops[middle] <= target:
+            if tops[middle] <= offset:
                 result = middle
                 low = middle + 1
             else:
@@ -89,16 +127,21 @@ class LaidOutSection:
         if self._block_tops is None:
             layout = self.document.documentLayout()
             tops: list[float] = []
+            heights: list[float] = []
             for index in range(len(self.blocks)):
                 text_block = self.document.findBlockByNumber(index)
-                tops.append(
-                    layout.blockBoundingRect(text_block).top() if text_block.isValid() else 0.0
+                rect = (
+                    layout.blockBoundingRect(text_block) if text_block.isValid() else QRectF()
                 )
+                tops.append(rect.top())
+                heights.append(rect.height())
             self._block_tops = tops
+            self._block_heights = heights
         return self._block_tops
 
     def invalidate_geometry(self) -> None:
         self._block_tops = None
+        self._block_heights = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,12 +149,9 @@ class SectionStats:
     """Per-section diagnostics, surfaced in the status bar and in tests."""
 
     index: int
-    pages: int
     blocks: int
+    height: float
     build_ms: float
-    iterations: int
-    converged: bool
-    pushed_blocks: int
 
 
 class LayoutEngine:
@@ -168,6 +208,15 @@ class LayoutEngine:
     @property
     def last_stats(self) -> SectionStats | None:
         return self._last_stats
+
+    @property
+    def line_step(self) -> float:
+        """Height of one line of body text (FR-073).
+
+        The controller scrolls by this and the wheel scrolls by a few of them, so
+        it has to be the height Qt actually laid out rather than a constant.
+        """
+        return self._style.line_step()
 
     def image_stats(self) -> ImageCacheStats:
         return self._image_cache.stats()
@@ -253,7 +302,10 @@ class LayoutEngine:
         started = time.perf_counter()
         blocks = self._book.blocks(index)
         document = build_document(blocks, self._style, self._image_cache)
-        pagination = paginate(document, blocks, self._geometry.content_size)
+        # The whole section, one column (ADR-016).  There is no pagination pass and
+        # no page-break repair, because neither has a meaning when there are no
+        # breaks: Qt lays the column out once and reports how tall it came out.
+        height = layout_continuous(document, self._geometry.content_size.width())
 
         anchors: dict[str, int] = {}
         for block_index, block in enumerate(blocks):
@@ -263,54 +315,65 @@ class LayoutEngine:
         elapsed = (time.perf_counter() - started) * 1000.0
         self._last_stats = SectionStats(
             index=index,
-            pages=pagination.page_count,
             blocks=len(blocks),
+            height=height,
             build_ms=elapsed,
-            iterations=pagination.repair.iterations,
-            converged=pagination.repair.converged,
-            pushed_blocks=len(pagination.repair.pushed_blocks),
         )
-        if not pagination.repair.converged:
-            _log.warning("page-break repair did not converge for section %d", index)
+        _log.debug(
+            "laid out section %d: %d blocks, %.0f px tall in %.1f ms",
+            index,
+            len(blocks),
+            height,
+            elapsed,
+        )
 
         return LaidOutSection(
             index=index,
             blocks=blocks,
             document=document,
-            page_count=pagination.page_count,
+            height=height,
             geometry=self._geometry,
-            repair=pagination.repair,
             build_ms=elapsed,
             anchor_blocks=anchors,
         )
 
     # ----------------------------------------------------------------- render
 
-    def render(self, section_index: int, page_index: int) -> QImage:
-        """Render one page as an image (FR-056)."""
+    def render_window(self, section_index: int, offset: float) -> QImage:
+        """Render the viewport at *offset* as an image (FR-056 / ADR-016).
+
+        The offset is rounded down to :data:`WINDOW_QUANTUM` and the image comes
+        out one quantum taller than the page box, so the caller draws the visible
+        part of it with a translate and scrolling inside a quantum never reaches
+        Python at all (NFR-005).
+        """
         section = self.section(section_index)
-        return render_page(
+        clamped = max(0.0, min(offset, section.max_offset))
+        return render_window(
             section.document,
-            max(0, min(page_index, section.page_count - 1)),
+            quantise_offset(clamped),
             section.geometry,
             self._settings,
             device_ratio=self._device_ratio,
         )
 
-    def prefetch(self, section_index: int, page_index: int) -> None:
-        """Decode the images a page needs before it is painted.
+    def prefetch(self, section_index: int, offset: float) -> None:
+        """Decode the images the viewport at *offset* is about to need.
 
-        Decoding costs roughly 10 ms per image, so doing it ahead of the paint
-        keeps page turns inside the "cache hit" budget (NFR-005).
+        Decoding costs roughly 10 ms per image, which a scroll cannot pay at paint
+        time, so the images of the window *after* this one are decoded here.  A
+        cache hit is a dictionary lookup and this is called on every scroll step,
+        so the look-ahead is deliberately one viewport: far enough for a wheel,
+        not so far that a jump decodes a screenful nobody will look at (NFR-005).
         """
         section = self.section(section_index)
         if not any(block.is_image for block in section.blocks):
             return
-        height = max(1.0, section.geometry.content_height)
-        top = page_index * height
-        bottom = top + height
+        viewport = max(1.0, section.geometry.content_height)
+        top = max(0.0, offset)
+        bottom = top + 2.0 * viewport
         layout = section.document.documentLayout()
-        for index in range(section.page_start_block(page_index), len(section.blocks)):
+        for index in range(section.block_at_offset(top), len(section.blocks)):
             block = section.blocks[index]
             if layout.blockBoundingRect(section.document.findBlockByNumber(index)).top() >= bottom:
                 break

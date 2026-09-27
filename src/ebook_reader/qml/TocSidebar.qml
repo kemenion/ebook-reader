@@ -21,7 +21,7 @@ Rectangle {
     readonly property string cBookTitle: ctl ? ctl.bookTitle : ""
     readonly property var cItems: ctl ? ctl.tocItems : []
 
-    width: 330
+    // Width comes from Main.qml, which shares the window between the open columns.
     color: cPanel
 
     function revealCurrent() {
@@ -34,6 +34,8 @@ Rectangle {
 
     ListView {
         id: list
+        // Named for the tests, which click a row through the real event path.
+        objectName: "tocList"
         anchors.fill: parent
         anchors.topMargin: header.height + 8
         anchors.bottomMargin: 12

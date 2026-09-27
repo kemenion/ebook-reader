@@ -1,0 +1,266 @@
+"""The three-column shell: the window, the column arithmetic, and what is in each.
+
+The harness - building ``Main.qml`` for real, waiting for it, and reading items back
+out of it - lives in ``conftest.py``, because the other integration modules need
+exactly the same one.
+
+The text column is the only column that is always there, and it is measured from the
+window's own edges: a panel that overlaps the text, or a derived width that stops
+re-evaluating, is invisible in a screenshot-sized assertion but shows up here.  The
+scroll model itself - keys, wheel, scroll bar, the strip at the end of a chapter -
+has its own module, ``test_scroll_view.py``.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from conftest import RESIZE_DEBOUNCE_MS, at, click, item, on_screen, pump, visible
+
+
+def _column(window) -> tuple[float, float]:
+    """Where the text column starts and how wide it is."""
+    page = item(window, "pageArea")
+    return page.x(), page.width()
+
+
+# --------------------------------------------------------------------- the shell
+
+
+def test_the_window_opens_wide_enough_for_three_columns(shell, warnings) -> None:
+    _, window, _ = shell
+    assert window.property("width") == 1400
+    assert window.property("minimumWidth") == 720
+    assert window.property("openColumns") == 0
+    assert window.property("pageColumnWidth") == 1400
+    assert warnings == []
+
+
+def test_the_columns_tile_the_window(
+    shell, kangpo_path: Path, heading_section: int
+) -> None:
+    """No overlap and no gap: the page gets what the panels do not take."""
+    _, window, controller = shell
+    assert controller.openBook(str(kangpo_path))
+    # The outline column only takes space where the section has something to list
+    # (FR-019), so the three-column arithmetic can only be measured on a section
+    # that carries headings - this fixture is the one with the most.
+    controller.goToSection(heading_section)
+    pump(2 * RESIZE_DEBOUNCE_MS)
+    full = float(window.property("width"))
+
+    # The table of contents comes up with the book (ADR-015): a reader who has never
+    # pressed `T` must still see that this book has one.
+    assert visible(window, "tocPanel")
+    assert not visible(window, "outlinePanel")
+    panel = window.property("sidePanelWidth")
+    toc = item(window, "tocPanel")
+    assert (toc.x(), toc.width()) == (0.0, panel)
+    assert _column(window) == (panel, full - panel)
+
+    controller.toggleOutline()
+    pump(2 * RESIZE_DEBOUNCE_MS)
+    outline = item(window, "outlinePanel")
+    assert visible(window, "outlinePanel")
+    start, width = _column(window)
+    assert (start, width) == (panel, full - 2 * panel)
+    assert (outline.x(), outline.width()) == (start + width, panel)
+    assert outline.x() + outline.width() == full
+
+    # Closing it again hands the width back to the page.
+    controller.toggleToc()
+    assert not visible(window, "tocPanel")
+    assert _column(window) == (0.0, full - panel)
+
+
+def test_the_page_is_set_for_the_column_not_the_window(
+    shell, kangpo_path: Path, heading_section: int
+) -> None:
+    """The point of occupying space: no panel is ever laid over the text."""
+    _, window, controller = shell
+    assert controller.openBook(str(kangpo_path))
+    controller.goToSection(heading_section)
+    controller.scrollBy(3000)                  # somewhere worth coming back to
+    pump(2 * RESIZE_DEBOUNCE_MS)
+    anchor = controller._anchor_block()
+
+    controller.toggleOutline()
+    pump(2 * RESIZE_DEBOUNCE_MS)
+
+    # `_view_size` is the page box the sections are laid out for, and the point of
+    # this test is precisely the seam between the two layers.
+    assert controller._view_size.width() == window.property("pageColumnWidth")
+    assert controller._view_size.width() < window.property("width")
+    # Re-setting the section for the narrower column is what taking a column costs
+    # (ADR-014).  It is paid in milliseconds, not in the reader's place (FR-051): the
+    # block the window is on survives the re-set, because the place is a block index
+    # plus a fraction of it rather than a page number (ADR-011).
+    assert controller._anchor_block() == anchor
+
+
+def test_the_outline_column_is_absent_when_it_has_nothing_to_show(
+    shell, kangpo_path: Path, heading_section: int
+) -> None:
+    """No content, no column - and the toggle that would open one does nothing.
+
+    FR-019: the column only exists while there is something to fill it with.
+    """
+    _, window, controller = shell
+    assert not visible(window, "outlinePanel")
+
+    # Toggled with nothing to list: the column is not opened at all, rather than
+    # standing empty beside the text.
+    controller.toggleOutline()
+    assert not controller.outlineVisible
+    assert not visible(window, "outlinePanel")
+    assert window.property("openColumns") == 0
+
+    assert controller.openBook(str(kangpo_path))
+    controller.goToSection(heading_section)
+    pump(2 * RESIZE_DEBOUNCE_MS)
+    assert controller.outlineAvailable
+    assert not visible(window, "outlinePanel")      # the refusal still stands
+    assert window.property("openColumns") == 1      # only the map is up
+
+    controller.toggleOutline()
+    pump(2 * RESIZE_DEBOUNCE_MS)
+    assert visible(window, "outlinePanel")
+    assert window.property("openColumns") == 2      # table of contents + outline
+
+    controller.closeBook()
+    assert not visible(window, "outlinePanel")
+    assert not visible(window, "tocPanel")
+    assert window.property("openColumns") == 0
+    assert window.property("pageColumnWidth") == window.property("width")
+
+
+def test_a_section_without_headings_gives_the_column_back(
+    shell,
+    kangpo_path: Path,
+    binan_path: Path,
+    heading_section: int,
+    headingless_section: int,
+) -> None:
+    """The column leaves when the section has no heading, and nobody presses `O`.
+
+    The outline is heading-only (ADR-016).  A section that carries no heading at all
+    therefore has nothing to list, and the rule "no content, no column" (FR-019) has
+    to be what puts the width back - not the reader noticing an empty strip.
+    """
+    _, window, controller = shell
+    # Opened where there are headings to fill it, because the controller will not
+    # open an empty column (FR-019) - and the toggle outlives the book change, so the
+    # outline is still on when the headingless section arrives.
+    assert controller.openBook(str(kangpo_path))
+    controller.goToSection(heading_section)
+    controller.toggleOutline()
+    pump(2 * RESIZE_DEBOUNCE_MS)
+    assert controller.outlineVisible
+    assert visible(window, "outlinePanel")
+
+    assert controller.openBook(str(binan_path))
+    controller.goToSection(headingless_section)
+    pump(2 * RESIZE_DEBOUNCE_MS)
+    assert controller.outlineVisible               # still toggled on, nothing to list
+    assert not controller.outlineAvailable
+    assert not visible(window, "outlinePanel")
+    # The outline column claims no width at all: only the map is in the sum, whether
+    # or not this book has one.
+    assert window.property("openColumns") == (1 if controller.tocVisible else 0)
+    assert _column(window)[1] == window.property("pageColumnWidth")
+
+
+def test_a_narrow_window_keeps_both_columns_usable(
+    shell, kangpo_path: Path, heading_section: int
+) -> None:
+    _, window, controller = shell
+    assert controller.openBook(str(kangpo_path))
+    controller.goToSection(heading_section)
+    controller.toggleOutline()
+    pump(2 * RESIZE_DEBOUNCE_MS)
+
+    window.setProperty("width", 720)
+    pump(2 * RESIZE_DEBOUNCE_MS)
+
+    panel = window.property("sidePanelWidth")
+    start, width = _column(window)
+    outline = item(window, "outlinePanel")
+    assert panel == 200
+    assert width >= 320
+    assert (start, start + width) == (panel, outline.x())
+    assert outline.x() + outline.width() == 720
+    assert window.property("pageColumnWidth") == width
+
+
+def test_the_settings_drawer_leaves_the_columns_alone(
+    shell, kangpo_path: Path, warnings
+) -> None:
+    _, window, controller = shell
+    assert controller.openBook(str(kangpo_path))
+    assert visible(window, "tocPanel")
+
+    controller.toggleSettings()
+    panel = item(window, "settingsPanel")
+    assert visible(window, "settingsPanel")
+    # `visible` says nothing here: the closed drawer is still `visible` and only slid
+    # past the window's edge, so it has to be asked where it is instead.
+    pump(2 * RESIZE_DEBOUNCE_MS)
+    assert on_screen(panel)
+    # The drawer is the one panel that takes no column of its own - it floats over
+    # the text.  The table of contents is on the other side of the text, so the
+    # drawer has nothing to take from it and the map stays on screen (FR-013);
+    # opening it costs no layout change at all.
+    assert visible(window, "tocPanel")
+    assert window.property("openColumns") == 1
+    assert _column(window) == (
+        window.property("sidePanelWidth"),
+        window.property("pageColumnWidth"),
+    )
+
+    # The drawer slides in, so wait for it to arrive before asking where it is.
+    pump(2 * RESIZE_DEBOUNCE_MS)
+    assert panel.x() == window.property("width") - panel.width()
+
+    # A click on the text beside it dismisses the drawer - and only the drawer: the
+    # shield that catches it sits on top of the reading area, so this must neither
+    # move the reader nor put the map away.
+    page = item(window, "pageArea")
+    before = (controller.sectionIndex, controller.scrollOffset)
+    click(window, at(page, 120, 400))
+    pump(2 * RESIZE_DEBOUNCE_MS)
+    assert not controller.settingsVisible
+    assert controller.tocVisible
+    assert (controller.sectionIndex, controller.scrollOffset) == before
+    assert warnings == []
+
+
+def test_only_settings_shields_the_page_from_clicks(
+    shell, kangpo_path: Path, heading_section: int
+) -> None:
+    """A panel beside the text must not swallow a click meant for the text (FR-062)."""
+    _, window, controller = shell
+    assert not visible(window, "settingsShield")
+
+    assert controller.openBook(str(kangpo_path))
+    controller.goToSection(heading_section)
+    controller.toggleOutline()
+    pump(2 * RESIZE_DEBOUNCE_MS)
+    assert controller.tocVisible and controller.outlineVisible
+
+    # Both columns stand, and neither of them is a shield: a click in the middle of
+    # the text lands on the text.
+    assert not visible(window, "settingsShield")
+    page = item(window, "pageArea")
+    click(window, at(page, page.width() / 2, 400))
+    pump(2 * RESIZE_DEBOUNCE_MS)
+    assert controller.tocVisible and controller.outlineVisible
+
+    controller.toggleSettings()
+    pump(2 * RESIZE_DEBOUNCE_MS)
+    assert visible(window, "settingsShield")
+
+    click(window, at(page, page.width() / 2, 400))
+    pump(2 * RESIZE_DEBOUNCE_MS)
+    # Dismissed the drawer; the map, which is not the drawer, is untouched.
+    assert not controller.settingsVisible
+    assert controller.tocVisible

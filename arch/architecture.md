@@ -32,7 +32,7 @@
 | G3 启动 ≤ 1.0s | NFR-001 | 同上 |
 | G4 库升级免疫（不随系统 webkit/gtk 大版本爆炸） | NFR-012, C-001 | GTK/WebKit/Tauri 方案结构性不满足 |
 | G5 包体积 ≤ 150MB | NFR-011 | 捆绑 Chromium 即 200MB+ |
-| G6 翻页动画 60fps 且可做「纸张卷曲」 | NFR-005, FR-092 | 需要 GPU 级自定义渲染能力 |
+| G6 滚动流畅度 60fps（量子内位移零回调；整屏切换可加 3D / 卷曲效果） | NFR-005, FR-092 | 需要 GPU 级合成能力 |
 | G7 Linux + Windows 双平台 | NFR-021 | WebKitGTK/libadwaita 无 Windows 支持 |
 | G8 实现成本可控（人月级，非人年级） | 项目现实 | 自研 shaping/断行不可接受 |
 
@@ -64,7 +64,7 @@
 | G3 启动 | ❌ ~1.0s | ❌ ~1.0s | ✅ **~0.4s** | ✅ ~0.3s | ❌ ~1.0s | ❌ ~1.0s |
 | G4 库升级免疫 | ✅ 捆绑 Chromium | ✅ 捆绑 Chromium | ✅ **捆绑 Qt** | ✅ 自包含 | ❌ **绑系统 WebKitGTK** | ❌ **绑系统 webkit2gtk** |
 | G5 包体积 | ❌ ~200MB | ❌ ~200MB | ✅ **~80–150MB** | ✅ ~60MB | ⚠️ 依赖系统 | ⚠️ 依赖系统 |
-| G6 翻页动画 | ⚠️ CSS 3D（受限） | ✅ ShaderEffect | ✅ **ShaderEffect + RhiItem** | ✅ 完全自由 | ⚠️ CSS 3D | ⚠️ CSS 3D |
+| G6 滚动流畅度 | ⚠️ CSS 3D（受限） | ✅ GPU 合成 | ✅ **QImage → GPU 纹理，量子内纯平移** | ✅ 完全自由 | ⚠️ CSS 3D | ⚠️ CSS 3D |
 | G7 Windows | ✅ | ✅ | ✅ **Qt 一等平台** | ⚠️ 需自行移植 | ❌ **无 Windows** | ⚠️ 用 WebView2 另一套代码 |
 | G8 实现成本 | ✅ 低 | ✅ 低 | ✅ **低（全是组装）** | ❌ **极高（人年）** | ✅ 低 | ✅ 低 |
 | 依赖数量 | ⚠️ 需 webview 绑定 | ⚠️ 2 项 | ✅ **1 项** | ❌ HarfBuzz+FreeType+… | ❌ 系统 GTK 栈 | ❌ 系统 WebKit 栈 |
@@ -155,11 +155,11 @@ enum BoundaryReason {
 
 | 能力 | API | 位置 |
 |---|---|---|
-| 分页 | `QTextDocument::setPageSize` / `pageCount()` | qtextdocument.h |
+| 定量版面 / 取列高 | `QTextDocument::setTextWidth` / `documentSize()`（`setPageSize` 自 ADR-016 起不再使用） | qtextdocument.h |
 | 首行缩进 | `QTextBlockFormat::setTextIndent()` | qtextformat.h:659 |
 | 行高 | `QTextBlockFormat::setLineHeight(h, type)` | qtextformat.h:673 |
 | 页边距 | `setTopMargin` / `setBottomMargin` / `setLeftMargin` / `setRightMargin` | qtextformat.h:639–654 |
-| 分页策略 | `setPageBreakPolicy(PageBreakFlags)` | qtextformat.h:686 |
+| 块级断行策略 | `setPageBreakPolicy(PageBreakFlags)`（ADR-016 后不再使用，保留为历史证据） | qtextformat.h:686 |
 | 懒加载 | `QTextDocument::loadResource()` **virtual** | qtextdocument.h |
 | 字距微调 | `QTextCharFormat::setFontLetterSpacing(qreal, SpacingType)` | qtextformat.h:463–467 |
 | 锚点/脚注 | `setAnchor(bool)` / `setAnchorHref(QString)` | qtextformat.h:568–573 |
@@ -181,15 +181,14 @@ enum BoundaryReason {
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  表现层 (Presentation) — QML                                 │
-│  ┌───────────────┐ ┌──────────────┐ ┌────────────────────┐  │
-│  │ PageView      │ │ TocSidebar   │ │ SettingsPanel      │  │
-│  │ (ShaderEffect │ │ (目录树)     │ │ (字号/字体/主题/…) │  │
-│  │  + 页面纹理)  │ │              │ │                    │  │
-│  └───────────────┘ └──────────────┘ └────────────────────┘  │
+│  ┌──────────────┐ ┌────────────┐ ┌──────────────┐ ┌──────────┐  │
+│  │ ReadingView  │ │ TocSidebar │ │ OutlinePanel │ │ Settings │  │
+│  │ 窗口纹理+滚动│ │ 目录树     │ │ 本节大纲     │ │ 设置面板 │  │
+│  └──────────────┘ └────────────┘ └──────────────┘ └──────────┘  │
 │         ▲ QML 属性绑定 / 信号槽                              │
 ├─────────┼───────────────────────────────────────────────────┤
 │  控制层 (Controller) — Python QObject                        │
-│  ReaderController: 当前节/页、翻页、跳转、位置记忆、设置       │
+│  ReaderController: 当前节/滚动偏移、滚动、跳转、位置记忆、设置 │
 │  职责：状态机 + 编排；不含排版算法，不含解析逻辑               │
 ├─────────┼───────────────────────────────────────────────────┤
 │  排版层 (Typeset) — Python，依赖 QtGui                       │
@@ -198,8 +197,8 @@ enum BoundaryReason {
 │  │ 字体/字号/行距│ │ WJ 注入/挤压 │ │ Block[]→QTextDocument│  │
 │  └──────────────┘ └──────────────┘ └─────────────────────┘  │
 │  ┌──────────────┐ ┌──────────────┐ ┌─────────────────────┐  │
-│  │ Paginator    │ │ ImageCache   │ │ PageRenderer        │  │
-│  │ 分页+边界修正│ │ 懒解码 + LRU │ │ QImage 光栅化       │  │
+│  │ LayoutEngine │ │ ImageCache   │ │ WindowRenderer      │  │
+│  │ 连续列排版   │ │ 懒解码 + LRU │ │ 窗口 → QImage        │  │
 │  └──────────────┘ └──────────────┘ └─────────────────────┘  │
 ├─────────┼───────────────────────────────────────────────────┤
 │  领域层 (Domain) — 纯 Python，零 Qt 依赖 ← 可无 GUI 测试     │
@@ -240,39 +239,41 @@ UI (QML) ──> Controller ──> Typeset ──> Domain ──> Infrastructur
 | **关注点分离** | 解析（文本→块模型）、排版（块模型→文档）、渲染（文档→位图）、交互（位图→用户）四段完全解耦 |
 | **单向数据流** | QML 只读 Controller 的只读属性，通过信号发起动作 |
 | **无 GUI 可测** | Domain + Kinsoku 全部可在纯 Python 下测试 |
-| **接口隔离逃生舱** | `BookSource` 抽象（当前仅 `EpubBook`，未来可加 `Fb2Book`）；`PageRenderer` 与 QML 之间只传 `QImage` |
+| **接口隔离逃生舱** | `BookSource` 抽象（当前仅 `EpubBook`，未来可加 `Fb2Book`）；`WindowRenderer` 与 QML 之间只传 `QImage` |
 | **不做全量预计算** | 节按需解析、按需排版、按需解码图片（对应 I-3 / R-05） |
-| **可降级** | 无 GPU 时软件光栅化；修正迭代超限时降级为允许切断 |
+| **可降级** | 无 GPU 时软件光栅化（`QT_QUICK_BACKEND=software` 实测可用）；列不再分级，故没有「修正迭代超限」这一类降级（ADR-016） |
 
-### 4.4 一次翻页的数据流（端到端）
+### 4.4 一次滚动的数据流（端到端）
 
 ```
-用户按 → / 点击右半屏
+用户滚动（滚轮 / 点击上下半屏 / ← → / PgUp PgDn / 拖动滚动条）
    │
    ▼
-[QML] PageView 发出 nextPage()  → [Python] ReaderController.next_page()
+[QML] ReadingView 调 ctl.scrollBy(px)（或 scrollUp / scrollDown / scrollPageUp / …）
    │
    ▼
-ReaderController 判断：当前节内还有下一页？
-   ├─ 有 → page_index += 1
-   └─ 无 → 切到下一节：Book.section(i+1).blocks()  （领域层，纯 Python）
+ReaderController 求新偏移并判断是否越过本节两端
+   ├─ 仍在列内 → 只更新 scrollOffset（多数帧连这一步都在 QML 里完成）
+   └─ 越过节端 → 切到下一/上一节：Book.blocks(i±1)（领域层，纯 Python）
    │
    ▼
-[Typeset] DocumentBuilder.build(blocks, style) → QTextDocument   ← 仅在切节时执行
-   │          ├─ Kinsoku.apply(blocks)  注入 WJ（仅切节时执行）
-   │          └─ doc.setPageSize(page_size) → page_count
+[Typeset] LayoutEngine.section(i)                ← 仅切节时执行
+   │          ├─ WJ 已在领域层规范化时注入（ADR-005），此处不重复
+   │          ├─ document.build(blocks, style) → QTextDocument（ADR-002）
+   │          └─ 一次布局得到**连续列总高** height，不再按页切分（ADR-016）
    │
    ▼
-[Typeset] Paginator.fix_page_breaks(doc)   ← 图片/标题跨界修正（仅在切节/改版式时执行）
+[Typeset] LayoutEngine.render_window(i, offset) → QImage
+   │          └─ 内部先 clamp 到 [0, max_offset]，再 quantise_offset()（32 px）
+   │             → 图为「页框 + 1 个渲染量子」高（ADR-008 / ADR-016）
    │
    ▼
-[Typeset] PageRenderer.render(doc, page_index) → QImage（含懒加载图片）
-   │
-   ▼
-[QML] PageView 收到 QImage，作为纹理；启动 ShaderEffect 翻页动画（纯 GPU，无 Python 回调）
+[QML] PageItem 把该 QImage 当纹理，只贴出「页框」那一块：
+      量子内的位移 = 源矩形平移（纯 GPU，零 Python 回调，NFR-005）
 ```
 
-**性能关键**：`next_page()` 在**同一节内**翻页时，只需第 4 步的 `render()`（约 15ms），不需要重新解析、重新排版。这是 60fps 翻页的前提（对应 ADR-008）。
+**性能关键**：同节内滚动时，只需第 5 步的 `render_window()`（实测 9–17 ms），而且**只在跨越量子时**才发生；量子内的每一帧都只是 `PageItem` 换一次源矩形，不进 Python。这是滚动跟手的根据（ADR-008 / ADR-016）。
+
 
 ---
 
@@ -286,8 +287,8 @@ ReaderController 判断：当前节内还有下一页？
 |---|---|
 | **背景** | 需求要求中文两端对齐、避头尾、首行缩进、可调行距（FR-030~FR-038）。自研排版需实现 UAX#14 断行、UAX#9 双向、CJK 禁则、OpenType shaping、字形光栅化缓存——工作量人年级（对应 G8）。 |
 | **决策** | 使用 Qt 内建富文本引擎 `QTextDocument` 承担全部排版职责。 |
-| **理由** | 实测确认 Qt 引擎对 `Script_Han` 有**专用字距分配分支**（`spaceAs = Justification_Character`），即按字符间空隙实现两端对齐——这正是中文排版正解，**无需任何额外工作**。同时分页、行高、缩进、页边距、分页策略等 API 齐备（见 3.4 证据 3）。 |
-| **已否决** | ① 自研 shaping 引擎：成本人年级。② 用 `QTextLayout` 逐行自管（比 QTextDocument 低一层但需自管分页/块模型）——留作 ADR-001-B 的后备方案，仅当 QTextDocument 在避头尾上被证伪时启用。 |
+| **理由** | 实测确认 Qt 引擎对 `Script_Han` 有**专用字距分配分支**（`spaceAs = Justification_Character`），即按字符间空隙实现两端对齐——这正是中文排版正解，**无需任何额外工作**。同时行高、缩进、页边距、块级断行策略等 API 齐备（见 3.4 证据 3；其中 `setPageSize` / `pageCount()` / `setPageBreakPolicy` 自 ADR-016 改为连续列后已不再使用）。 |
+| **已否决** | ① 自研 shaping 引擎：成本人年级。② 用 `QTextLayout` 逐行自管（比 QTextDocument 低一层，但需自管块模型与滚动定位）——留作 ADR-001-B 的后备方案，仅当 QTextDocument 在避头尾上被证伪时启用。 |
 | **后果（代价）** | 受限于 Qt 引擎能力边界：**不支持竖排（直排）与 ruby 注音**（已列入 Out of Scope，且实测两本目标书均无 ruby）。若未来遇到直排书，需退化为「能读但不好看」。 |
 | **验证** | P0 实测：中文段落 `AlignJustify` 观感 + 节排版耗时 ≤ 50ms。 |
 
@@ -301,7 +302,7 @@ ReaderController 判断：当前节内还有下一页？
 |---|---|
 | **背景** | 目标书 XHTML 含 4044 个 `<b>`、2303 个 `<span>`、554 个 `<div>`、17 种内联 style，且声明了 Linux 上**不存在**的字体 `PingFang SC` / `FZFangSong-Z02`（I-4/I-5）。 |
 | **决策** | 不使用 `QTextDocument.setHtml()`；改为把 XHTML 规范化为**自有 `Block` 模型**，再用 `QTextCursor::insertBlock/setBlockFormat/insertText/setCharFormat/insertImage` 逐块写入。 |
-| **理由** | ① Qt 的 `setHtml` 只支持 **HTML4 子集 + 极少量 CSS**，`<span>` 上的 margin 等无效，且无法干预发布者的 `font-family`。② 程序化构建让**样式 100% 由我们的 `TypographySettings` 决定**，彻底免疫发布者 CSS（对应 FR-024）。③ 块模型是纯 Python 数据结构，可在无 GUI 下测试（NFR-022）。
+| **理由** | ① Qt 的 `setHtml` 只支持 **HTML4 子集 + 极少量 CSS**，`<span>` 上的 margin 等无效，且无法干预发布者的 `font-family`。② 程序化构建让**样式 100% 由我们的 `TypographySettings` 决定**，彻底免疫发布者 CSS（对应 FR-024）。③ 块模型是纯 Python 数据结构，可在无 GUI 下测试（NFR-022）。 |
 | **已否决** | ① `setHtml()`：受 HTML 子集限制且无法可靠覆盖内联样式（发布者的 `font-family` 会污染排版）。② 先 `setHtml` 再遍历修正 `QTextCharFormat`：需要反向解析 Qt 的产出，逻辑脆弱且慢。 |
 | **后果（代价）** | 需自写 XHTML→Block 规范化层（约 500–700 行），并承担「块模型丢文本」的风险 → 用**字符守恒断言**（块模型文本总长 vs 原始文本长度差异 < 1%）在单测中守住（R-09）。 |
 | **验证** | 单测：两本目标书全部 62 个节的「字符守恒」检查；P0 目视排版正确。 |
@@ -313,15 +314,17 @@ ReaderController 判断：当前节内还有下一页？
 | 项 | 内容 |
 |---|---|
 | **背景** | 康波书 27 节 / 23.8 万字，币安书 35 节 / 19.1 万字。`QTextDocument` 的每个段落是一个 C++ 对象，单文档承载全书会产生数万块与数万 `QTextBlock` 对象。 |
-| **决策** | 一个 **spine 节** 对应一个 `QTextDocument`；维护最近 **N 节（默认 3）** 的 `(QTextDocument, 分页结果, 页位图缓存)` 的 LRU；切节时按需构建。 |
+| **决策** | 一个 **spine 节** 对应一个 `QTextDocument`；维护最近 **N 节（默认 3）** 的 `(QTextDocument, 连续列几何, 窗口位图缓存)` 的 LRU（即 `LayoutEngine.section()`，ADR-016）；切节时按需构建。 |
 | **理由** | ① 单节最大 22,051 字 ≈ 100 段，Qt 布局耗时可控（目标 30ms）。② 排版成本被**摊到每次切节**，而非打开书时一次性 200ms+ 卡住。③ 内存可控：同时最多 3 个文档在内存。④ 天然支持「按节跳转」（目录跳转即切节）。 |
-| **已否决** | ① 全书单文档：布局开销大、内存高、改字号时全量重排会有明显卡顿。② 一页一文档：分页需要预先知道页边界，逻辑上不可能。 |
-| **后果（代价）** | **跨章节连续滚动会变得复杂**（需要拼接两个文档的布局）→ 由 ADR-004 通过「分页模式」从根上规避。此外节边界处可能出现「上一节末尾大量空白」的观感问题 → 由 FR-059（跳过空白页）缓解。 |
+| **已否决** | ① 全书单文档：布局开销大、内存高、改字号时全量重排会有明显卡顿。② 一页一文档（改为连续列后即「一个窗口一文档」）：仍要**预先知道边界**，而窗口是渲染期的取景概念——按偏移现算，逻辑上不可能。 |
+| **后果（代价）** | **跨章节连续滚动会变得复杂**（需要拼接两个文档的布局）→ v1 曾由 ADR-004 的「分页模式」从根上规避；**ADR-016 改回连续滚动后，仍不做两文档拼接**：节就是列的单位，越过节端即换列（代价是「节尾留白」观感）→ 由 FR-059 缓解。 |
 | **验证** | 内存占用 ≤ 200MB 且切节时无可见卡顿。 |
 
 ---
 
 ### ADR-004 主阅读模式为**分页**（pagination），非连续滚动
+
+> **⚠ 已由 ADR-016 取代（下文整条保留为决策史）**：v1 之后主阅读模式改回**连续滚动列**，页面不再是模型的一部分——`Paginator` / `page_count` / 页码都不存在了，位置由连续偏移（offset）表达。下文「背景 / 决策 / 理由 / 已否决 / 代价」记录的是取代**之前**的取舍，其中「跨节不拼接」这一条仍被 ADR-016 沿用。
 
 | 项 | 内容 |
 |---|---|
@@ -353,16 +356,18 @@ ReaderController 判断：当前节内还有下一页？
 | 项 | 内容 |
 |---|---|
 | **背景** | 康波书 408 张图（85.0MB，均 208KB，典型 900×1400）。若全量解码：`408 × 900 × 1400 × 4B ≈ 2.0 GB`——**必然 OOM**（I-3 / R-05）。 |
-| **决策** | 三层策略：<br>① **尺寸预读**：排版前只读 JPEG/PNG 文件头解析宽高（不解码像素），用于计算图片在版心中的占位尺寸；<br>② **懒解码**：仅当某页需要绘制时，才真正解码该页涉及的图片；<br>③ **LRU 缓存**：缓存已解码 `QImage`，容量上限 24 张 / 32MB（双限），超出即淘汰最久未用者。 |
+| **决策** | 三层策略：<br>① **尺寸预读**：排版前只读 JPEG/PNG 文件头解析宽高（不解码像素），用于计算图片在版心中的占位尺寸；<br>② **懒解码**：仅当某个窗口需要绘制时，才真正解码该窗口涉及的图片；<br>③ **LRU 缓存**：缓存已解码 `QImage`，容量上限 24 张 / 32MB（双限），超出即淘汰最久未用者。 |
 | **理由** | ① 一页通常含 0–2 张图 → 峰值解码量极小。② 头解析单张 < 1ms，408 张全预读仅需数十 ms，可接受。③ 缓存同时受「张数」与「字节数」双限，防止少数超大图撑爆内存。 |
 | **实现要点** | 图片数据经 `QTextDocument::loadResource()`（**已确认是 virtual**）回调获取——按需从 ZIP 读取字节，无需解压到临时文件。 |
-| **已否决** | ① 全量预解码：2.0GB，直接 OOM。② 全部解压到磁盘临时目录再按需读：磁盘占用 85MB+、首次打开慢、清理麻烦。③ 只读 ZIP 不缓存 `QImage`：每次翻回旧页都重复解码，浪费 10ms×N。 |
-| **后果（代价）** | 需额外「预取下一页图片」逻辑（在 `next_page` 时顺手解码下一页的图），否则首次进入新页有约 10ms 可感知延迟。 |
-| **验证** | 翻 50 页后 RSS ≤ 200MB；图片缓存峰值 ≤ 32MB；单张解码 ≤ 25ms。 |
+| **已否决** | ① 全量预解码：2.0GB，直接 OOM。② 全部解压到磁盘临时目录再按需读：磁盘占用 85MB+、首次打开慢、清理麻烦。③ 只读 ZIP 不缓存 `QImage`：每次滚回旧位置都重复解码，浪费 10ms×N。 |
+| **后果（代价）** | 需额外「预取邻接窗口图片」逻辑（滚动前进时调 `LayoutEngine.prefetch(section, offset)`，顺手解码下一窗口覆盖的图），否则首次滚入该窗口时图片有约 10ms 可感知延迟。 |
+| **验证** | 连续滚动 50 个窗口后 RSS ≤ 200MB；图片缓存峰值 ≤ 32MB；单张解码 ≤ 25ms。 |
 
 ---
 
 ### ADR-007 分页边界的**迭代修正**（图片与标题不被页边界切断）
+
+> **⚠ 已由 ADR-016 取代（下文整条保留为决策史）**：连续列模式下**没有页边界**，因此没有跨界修正这件事——图片与标题可以出现在窗口的任意位置，本来就不「切断」任何东西（切开的只是窗口，滚动一下即可看到全貌）。但本 ADR 的**问题**（块不能被页边界切坏）在窗口渲染里换了个形式继续存在，由 ADR-016 用「窗口高度 = 页框 + 1 量子」的余量承接。
 
 | 项 | 内容 |
 |---|---|
@@ -377,14 +382,16 @@ ReaderController 判断：当前节内还有下一页？
 
 ### ADR-008 页面在 Python 侧光栅化为 `QImage`，QML 侧只做 GPU 合成
 
+> **已由 ADR-016 修订（决策本身不变）**：光栅化单位由「页」改为「**窗口**」= 页框高 + 1 个渲染量子（32 px），Python 侧对量子对齐后的偏移绘制，QML 侧用源矩形平移取出页框那一块。职责切分与「动画期间零 Python 调用」都原样保留，下面提到「页」的地方按「窗口」读。
+
 | 项 | 内容 |
 |---|---|
-| **背景** | 需同时满足「翻页动画 60fps」（NFR-005）与「无 GPU 环境可用」（NFR-017）。若每帧回调 Python 绘制，GIL + 绑定开销必然掉帧。 |
-| **决策** | 严格职责切分：<br>① **Python 侧**：把目标页绘制为 `QImage`（尺寸 × `devicePixelRatio`），交给 QML；<br>② **QML 侧**：把该 `QImage` 当纹理，用 `ShaderEffect` / `ShaderEffectSource` 完成所有动画（位移、3D 翻转、卷曲、阴影）；<br>③ **动画期间零 Python 调用**，动画结束（`onStopped`）后才回调 Python 更新状态。 |
+| **背景** | 需同时满足「滚动与翻屏流畅」（NFR-005）与「无 GPU 环境可用」（NFR-017）。若每帧回调 Python 绘制，GIL + 绑定开销必然掉帧。 |
+| **决策** | 严格职责切分：<br>① **Python 侧**：把目标**窗口**绘制为 `QImage`（宽 = 页框宽，高 = 页框高 + 1 个量子；尺寸 × `devicePixelRatio`），交给 QML；<br>② **QML 侧**：把该 `QImage` 当纹理（`PageItem.image`），只把「页框」那一块贴出来，位移用源矩形平移完成；<br>③ **量子内滚动期间零 Python 调用**（`PageItem.pan`），只有跨量子或跨节才回调 Python 取新图。 |
 | **理由** | ① 动画帧由 Qt Quick 场景图（RHI）在 GPU 或软件后端完成，不受 Python 限制。② `QImage` 是两种后端都支持的最简公共接口。③ 软件渲染时同样可用，天然满足 NFR-017。 |
-| **已否决** | ① 直接把 `QTextDocument` 暴露给 QML（`TextEdit`/`TextArea` 的 `textDocument`）：那是编辑场景接口，不支持按页渲染，也无法控制分页修正。② 每帧 `grabToImage()`：一帧一次全量重绘，无法 60fps。③ 用 `QQuickRhiItem` 自定义 GPU 渲染：能力最强但复杂度过高，v1 不需要；作为未来「极致性能」路径保留（NFR-032）。 |
-| **后果（代价）** | 页面位图占内存：`1600×2400×4B ≈ 15MB/页`（HiDPI 2×）→ 需页位图 LRU（缓存 3–5 页 ≈ 75MB），须纳入 NFR-002 的 200MB 预算。低 DPI 下仅 ~4MB/页。 |
-| **验证** | 翻页动画 ≥ 55fps；`QT_QUICK_BACKEND=software` 下仍可正常翻页。 |
+| **已否决** | ① 直接把 `QTextDocument` 暴露给 QML（`TextEdit`/`TextArea` 的 `textDocument`）：那是编辑场景接口，不支持按偏移 / 按窗口渲染，也无法控制避头尾注入与样式。② 每帧 `grabToImage()`：一帧一次全量重绘，无法 60fps。③ 用 `QQuickRhiItem` 自定义 GPU 渲染：能力最强但复杂度过高，v1 不需要；作为未来「极致性能」路径保留（NFR-032）。 |
+| **后果（代价）** | 窗口位图占内存：`1600×(2400+32)×4B ≈ 15MB/张`（HiDPI 2×）→ 由 `ReaderController._window_cache` 的 LRU 限制（`_WINDOW_CACHE_SIZE = 5` 张 ≈ 75MB），须纳入 NFR-002 的 200MB 预算。低 DPI 下仅 ~4MB/张。 |
+| **验证** | 连续滚动 / 翻屏 ≥ 55fps；`QT_QUICK_BACKEND=software` 下仍可正常滚动。 |
 
 ---
 
@@ -418,10 +425,10 @@ ReaderController 判断：当前节内还有下一页？
 
 | 项 | 内容 |
 |---|---|
-| **背景** | 需记忆并恢复阅读位置（FR-080），且窗口尺寸/字号变化会引起重新分页（FR-051），因此**不能用「页码」作为持久化位置**（页码不稳定）。 |
-| **决策** | 持久化 `(spine_index, block_index, char_offset_in_block)`：<br>① `spine_index` = 节在 spine 中的序号；<br>② `block_index` = 块在**规范化后块列表**中的序号；<br>③ `char_offset` = 块内字符偏移（含 WJ，见 ADR-005）。<br>恢复时：重建该节文档 → `QTextDocument.findBlockByNumber(block_index)` 定位块 → 计算该块落在第几页 → 跳到该页。 |
-| **理由** | 该三元组在**字号变化、窗口缩放、分页重算后依然有效**，是稳定标识。`QTextDocument` 的块序号与我们的块列表序号一一对应（构建时严格按序 `insertBlock`），映射成本 O(1)。 |
-| **已否决** | ① 存页码：版式一变即失效。② 存全书百分比：粒度太粗，恢复后常偏移数页。③ 存 `QTextCursor` 绝对 position：文档重建后 position 语义可能漂移，且跨节不通用。 |
+| **背景** | 需记忆并恢复阅读位置（FR-080），且窗口尺寸/字号变化会引起重新排版（FR-051），因此**不能用「页码」作为持久化位置**——何况连续列里根本没有页码（ADR-016），位置只能是文字坐标。 |
+| **决策** | 持久化 `(spine_index, block_index, char_offset_in_block)`：<br>① `spine_index` = 节在 spine 中的序号；<br>② `block_index` = 块在**规范化后块列表**中的序号；<br>③ `char_offset` = 块内字符偏移（含 WJ，见 ADR-005）。<br>恢复时：重建该节文档 → `QTextDocument.findBlockByNumber(block_index)` 定位块 → `LaidOutSection.block_offset(block_index)` 换算成列内偏移 → 滚到该偏移（ADR-016）。 |
+| **理由** | 该三元组在**字号变化、窗口缩放、重新排版后依然有效**，是稳定标识。`QTextDocument` 的块序号与我们的块列表序号一一对应（构建时严格按序 `insertBlock`），映射成本 O(1)。 |
+| **已否决** | ① 存页码：版式一变即失效。② 存全书百分比：粒度太粗，恢复后常偏移数屏。③ 存 `QTextCursor` 绝对 position：文档重建后 position 语义可能漂移，且跨节不通用。 |
 | **后果（代价）** | 需保证「块列表序号」与「QTextDocument 块序号」严格一致：构建时不插入多余空块（Qt 自动创建的末尾空块在计数时排除）。 |
 | **验证** | 单测：同一位置在字号 16 与 20 下恢复后落在同一段落；手工：关掉重开回到原处。 |
 
@@ -451,6 +458,43 @@ ReaderController 判断：当前节内还有下一页？
 | **已否决** | ① `pip install` 直接分发：用户需自装 Python，体验差。② Flatpak：包体更大且需系统 runtime。③ Nuitka / `pyside6-deploy`：需把整个应用编译为 C，构建时间显著更长，而收益（启动速度）对本项目已被证明不关键。④ 手工 `--add-data` 枚举 Qt QML 模块：漏一项即静默失效，正是 R-07 本身。 |
 | **后果（代价）** | 单文件版每次启动需解包约 160 MB，首屏由 0.27 s 变为 1.00 s——仍满足 NFR-001，但吃掉了大部分余量。**日常使用与 AppImage 应基于文件夹版**；单文件版只用于分发与拷贝。 |
 | **验证** | 见 §12.8：两种产物在真实 Wayland 下三种启动方式均 0 错误；`bundle.py check` 报 0 个未解析库、0 个未解析 QML import。 |
+
+---
+
+### ADR-014 目录 / 大纲栏**占用正文空间**（三栏布局），只有设置面板仍是浮层
+
+| 项 | 内容 |
+|---|---|
+| **背景** | §12.3 问题 7 曾把面板改成浮层覆盖，理由是「页面几何只由窗口决定 → 打开面板不触发重排」。代价是：开着目录时每行正文的前 330 px 被遮住，读者无法「一边看目录一边读」。FR-018 / FR-019 要求右侧给出**本节大纲**，与左侧目录同时可见，因此三栏必须同时真正可见。 |
+| **决策** | ① 三栏为 **目录 ｜ 正文 ｜ 本节大纲**；前两者与正文**平铺**（`x`/`width` 相接），设置面板保持浮层抽屉（它是临时改参数用的，遮住文字可接受，且保留滑入动画不牵动别的东西）；抽屉只与**同侧**的大纲栏互斥，不再连带动左侧目录（ADR-015 ⑤）。② 面板宽度 `max(200, min(320, (窗口宽 − 440) / 打开的栏数))`：开一栏时不超过 320，两栏同开时按剩余宽度收缩，并为正文至少留 440 px。③ 交给 Python 的页框宽度是**正文栏宽**，不是窗口宽。④ 窗口默认 1000×1380 → **1400×1380**，最小宽度 520 → **720**。⑤ 大纲栏在当前节**没有可显示内容时不出现**（`outlineAvailable` 为假即不占位），避免一条空白竖带。 |
+| **理由** | 目录与大纲是**阅读时一直要看**的地图，遮住正文等于让读者在「看地图」和「看书」之间二选一；设置面板是偶发操作，浮层正合适。这一区分（地图平铺 / 抽屉浮层）比「所有面板都浮层」或「所有面板都平铺」都更贴合使用频率。 |
+| **已否决** | ① 继续全部浮层：违反 FR-019，且三栏同时可见无从实现。② 面板做成可拖拽的分割条（splitter）：v1 不需要，且引入新的持久化状态（每栏宽度），而自动宽度已能覆盖 720–1920 px 全部窗口尺寸。③ 给尺寸变化加过渡动画（面板与正文同步做 180 ms 动画）：一次面板开关就要把整节重新排版、整页重新光栅化，动画期间每帧都要画过渡状态的页，收益低、风险高，故**第一版不做尺寸过渡**，只有设置抽屉保留滑动动画。 |
+| **后果（代价）** | **开/关侧栏会触发本节重排**（这是放弃浮层的直接代价，必须如实记录）：实测最重的节 20–72 ms，与「拖动窗口改变大小」同一量级，因此不构成新的性能类别。阅读位置不丢：位置是 `(节, 块, 字符偏移)`（ADR-011），重排路径沿用既有的 `_current_anchor_block()` → `block_offset()` 锚点回填；`setViewSize` 与设置变更都会调用 `_drop_outline()` 丢弃大纲缓存（其行携带的是本列偏移，只对一套页框有效）。 |
+| **验证** | `tests/integration/test_layout.py`：三栏 `x`/`width` 相接（无重叠、无缝）、页框宽度 = 正文栏宽而非窗口宽、窄窗口下两栏仍可用、无内容时不出现右栏、只有设置面板会遮断点击区（FR-062）。`tests/integration/test_outline.py`：大纲只列本节标题（ADR-016），重排后按新的正文栏宽重建。 |
+
+---
+
+### ADR-015 全功能右键菜单；目录栏随书展开并**常驻**
+
+| 项 | 内容 |
+|---|---|
+| **背景** | 快捷键（`T`/`O`/`S`/`[`/`]`/`Ctrl±`）只写在设置抽屉里，而设置抽屉本身也要靠 `S` 才能打开。实际使用中出现的反馈是「没看到左边有目录」——根因不是功能缺失，而是**入口不可见**：目录默认收起，且没有任何鼠标可发现的痕迹（FR-013 / FR-071）。反馈的下一轮是「目录要一直存在，或者有一个按钮能快速显示 / 隐藏」：默认展开解决了「看不到」，但点一下章节它就自己收了（`goToTocRow()` 里仍写着浮层时代的 `_toc_visible = False`，与已作废的 FR-015、FR-018、README 都不符），而且除 `T` 键之外仍没有鼠标入口。 |
+| **决策** | ① 打开书时**目录栏默认展开**（书没有目录则不展开，与 FR-019 的「没有内容就不占栏」同一规则）；关闭书时目录与大纲一起收起（栏属于那本书）。② 窗口级加一层 `MouseArea`（`acceptedButtons: Qt.RightButton`、`scrollGestureEnabled: false`），声明在 `Main.qml` 可视项**之前**（即 z 序最底层），在鼠标位置 `popup()` 出 `ReaderMenu.qml`。③ 菜单**平铺 + 分组分隔线**：21 行，只有 6 个「值型」行（字号 / 行距 / 边距 / 字体 / 对齐 / 主题）带子菜单，父行标签里写着当前值（「字号 18」）；其余操作一行直达。④ 行状态由控制器单向驱动：勾选标记是自定义属性 `marked`（**不是** `checkable`，避免 QQC2 先自翻 `checked` 再触发 `triggered` 与绑定打架），无书或该项不可用时整行置灰。⑤ **目录栏常驻，面板只在争同一块空间时才相让**：`goToTocRow()` 不再收起目录（FR-015 的作废由此真正落到代码），滚动与开关大纲也不影响它；设置抽屉浮在右侧，只让**同侧**的大纲栏让位，不再连带动左侧目录，点击抽屉旁边也只关抽屉（新增 `closeSettings()`，不再是 `closePanels()`）。收起目录只剩显式操作：`T` / 状态栏按钮 / `Esc` / 右键菜单。⑥ **状态栏左下角常驻「目录」按钮**（`StatusBar.qml`，`objectName: tocToggle`）：开栏时整块填充主题强调色、关栏时只描边，右端以小字标出 `T`，无书或书无目录时整块置灰（与菜单「目录」行同一规则）。按钮放在状态栏而不是另加一条工具栏：状态栏在页框之外，不占正文空间，位置也固定。 |
+| **理由** | ① 「栏属于书」与「目录随书出现」自洽：有书才有地图，没书就没有栏，顺带消掉「关书后左栏残留」这一类缺陷。② 右键层放**最底层**：鼠标事件按 z 序自上而下派发，只声明右键的 MouseArea 不会截住左键（左键被上层的点击区 FR-062 先取走），而未被子项接受的右键会一路下传到这里——正文、面板、状态栏都覆盖得到。放最底层而不是最上层，是因为这一层只接「别人不要的」右键：将来任何面板行想自己处理右键，不会被这层抢走。③ 平铺而非多级子菜单：读者找的是「目录在哪」，多一级就多一次失败机会；把 6 个值型行放进子菜单，菜单才稳定在约 670 px（默认窗口内容高 1348 px；最小窗口时菜单可滚动）。④ 「常驻」比「能打开」更接近读者的实际用法：地图是用来反复对照的，跳一次就消失等于每次都要重找入口。⑤ 按钮的开关态同样由控制器单向驱动（自定义 `checked`，不用 `checkable`）：QQC2 的 checkable 按钮会先自翻 `checked` 再发 `clicked`，绑定被覆盖后按钮与面板会各说各话。⑥ 面板之间只在**争同一块空间**时相让，是 ADR-014 三栏布局的自然推论：目录占左栏、大纲占右栏、抽屉浮在右侧，所以抽屉只与大纲互斥。 |
+| **已否决** | ① 只加提示文案（在状态栏写「右键看菜单」）：提示还在屏幕边缘，不解决问题。② 用 `MenuBar` / 工具栏：占纵向空间，与「沉浸阅读」冲突。③ 用 `checkable: true` 让 QQC2 自己管勾选：点击会先翻 `checked`，绑定被覆盖后状态与控制器不一致。④ 全部平铺（29 行、约 930 px）：最小窗口下要滚动才看得到「退出」，得不偿失。⑤ 另加一条顶部工具栏承载开关：占纵向空间，与「沉浸阅读」冲突（同②），而状态栏本来就在页框之外且处处可见。⑥ 让目录栏「永不收起」（连 `T` 都不响应）：读者一旦想全宽阅读就没有退路，正确做法是常驻 + 一键收起。 |
+| **后果（代价）** | ① 菜单把 21 个操作与快捷键抄了一份，是**刻意的重复**：新增操作必须同时改 `ReaderMenu.qml`，`test_menu.py` 用「每一项都存在、且不多不少」钉住这份清单。② 打开书时多一次重排：目录栏展开 → 正文栏宽变化 → 本节重排（与开关侧栏同一量级，20–72 ms；当时的日志行 `first page ready`（现为 `first window ready`）由 86–92 ms 变为 114–123 ms，数字为 ADR-016 之前的实测，NFR-001 余量仍充足）。③ 右键层在最底层，面板行自身失去右键语义（当前无此需求）。④ 目录栏常驻之后，读者若想全宽阅读需要一次显式操作（`T` / 按钮 / `Esc` / 右键菜单，四个入口），而状态栏因此多了一个控件：它的开关态必须继续由控制器单向驱动，`StatusBar.qml` 只是画出来（`checked` 是绑定，不是状态）。 |
+| **验证** | `test_menu.py`（9 项）：真事件右键在正文 / 目录栏 / 状态栏三处都能弹出且弹在鼠标处；21 行 + 14 个子菜单项全部存在、且不多不少；无书时整行置灰、已开栏带勾选；**真点击**「下一章」真的换章、「主题 → 夜间」真的换主题（子菜单两跳全程鼠标）；右键点滚动条只弹菜单（偏移不变），同一处左键真的滚动。`test_layout.py`：开书后左栏可见且三栏 x/width 相接；关书后两栏消失、宽度归还正文；开设置抽屉后左栏**仍在**、页框不变。`test_toc_panel.py`（5 项）：状态栏「目录」按钮**真点击**即显示 / 隐藏，页框跟着正文栏宽走；按钮在页框之外（状态栏内）且点击不滚动；无书时置灰、点击不产生副作用；**真点击**目录项跳转后左栏仍在、高亮跟随；点章节 / 滚动 / 开大纲都不收起目录，只有 `T` / `Esc` 收起。 |
+
+### ADR-016 主阅读模式为**连续滚动列**（取代 ADR-004 的分页；ADR-007 作废，ADR-008 的单位改为「窗口」）
+
+| 项 | 内容 |
+|---|---|
+| **背景** | v1 按 ADR-004 走完分页实现后，真实使用暴露出分页本身带来的四类问题：① **页边界是纸的约束**，屏幕不需要它，但它把「一屏能读多少」变成硬边界，一章读不顺；② 只要块跨页就要修——ADR-007 的迭代修正最多 8 轮（重排 8 次），修完底部仍可能留白，而且**每次改字号 / 改窗口都要重跑**；③ 修正超限只能降级为「允许切断」，观感随书而变；④ 页码不稳定，阅读位置（ADR-011）必须绕开页码、用「块落在第几页」反算。 |
+| **决策** | ① **一节 = 一列**：`QTextDocument` 只按**正文栏宽**排版，取列总高 `LaidOutSection.height`（实测 = `document.size().height()`），**不调 `setPageSize`，不产生页**。② **位置 = 列内偏移**（逻辑像素）：`block_offset(i)` 给块顶偏移，`block_at_offset(offset)` 给「顶部不晚于 offset 的最后一个块」，`max_offset` 是合法偏移上界；ADR-011 的三元组照旧持久化，恢复时用 `block_offset()` 换算成偏移。③ **渲染单位 = 窗口**：高 = 页框高 + 1 个 `WINDOW_QUANTUM`（32 px）；偏移先 clamp 到 `[0, max_offset]` 再 `quantise_offset()`（量子对齐），`render_window(section, offset) → QImage`。④ **QML 只贴「页框」那一块**：`PageItem` 用 `drawImage` 的源矩形平移完成量子内的位移（`pan`），这一路**零 Python 调用**。⑤ **越界即换节**：相邻两节**不拼接**（沿用 ADR-003 / ADR-004 的取舍），`]` / `[` 与菜单「上一章 / 下一章」仍可显式换节。⑥ **删掉分页相关的一切**：`Paginator`、`page_count`、`page_breaks`、`block_page()` 全部消失；大纲不再按页切片（FR-018 的「按页回退」作废，无标题的节就不提供该栏，FR-019）；状态栏由页码改为**位置百分比**（「本卷 x% · 全书 y%」，FR-072 / FR-075）。 |
+| **理由** | ① **问题整类消失**：没有页边界，就没有「跨页切断」，也就没有边界修正、迭代收敛、降级与修正留白——ADR-007 要解决的事在连续列里不存在。② **位置更简单**：偏移是列的自然坐标，字号 / 栏宽变化后按块回填（`block_offset(anchor)`）即可。③ **渲染更省**：窗口只比页框多 32 px，而量子内的每一帧都不进 Python，比「每页全量光栅化 + 翻页动画」更轻。④ **Qt 天然支持**：`QTextDocument` 不定高、`documentLayout().documentSize()` 直接给列高，排版仍是一次 pass，未引入任何新机制。⑤ 与「沉浸阅读」的定位一致：读的是文字流，不是纸。 |
+| **已否决** | ① **两套模式并存**（分页 + 连续）：位置、缓存、大纲、菜单、测试都要两套，而分页那一套的问题没有一个是连续模式也需要的。② **任意偏移渲染**（不对齐量子）：滚一格就重新光栅化整窗（9–17 ms），跟手性会丢；量子对齐把量子内变成纯平移。③ **相邻节拼接成一列**（真·全书连续滚动）：要同时持有两个 `QTextDocument` 并做偏移换算、跨文档图片预取与位置记忆——ADR-003 的取舍不变。④ **QML 直接用 `TextEdit` / `TextArea` 滚动**：ADR-008 已否决的编辑场景接口，样式与避头尾注入都失控。⑤ **`QGraphicsView` / `QScrollArea` 包 `QTextDocument`**：回到「每帧 Python 绘制」的老路（ADR-008）。 |
+| **后果（代价）** | ① **节尾留白仍在**（节是列的单位）：`max_offset` 之后就是下一节，ADR-003 的代价如实保留。② 位置恢复是**按块回填**而非像素级精确：字号变化后落在同一块的行首附近（ADR-011 的验证仍成立）。③ **没有页码**：状态栏只能报百分比，「翻到第 120 页」这种用法不再存在。④ 窗口位图比页位图多 32 px 高，并新增 `ReaderController._window_cache`（5 张 LRU，ADR-008 的代价）。⑤ 大纲失去「按页切片」这一兜底，只在有标题的节出现。⑥ **一次性重写**：`test_typeset.py` 整体改为面向列的断言，任何引用「页」的文档段落都要重写（本次一并完成）。 |
+| **验证** | `tests/integration/test_typeset.py`（22 项，全部面向列）：窗口几何 = 页框 + 1 量子；列高 = `document.size().height()` 且 `clear()` 后重建可复现；块↔偏移双向映射（`block_at_offset` 是「不晚于 offset 的最后一个块」，同顶多块时取其中一个）；418 张图在列中的矩形与显示尺寸偏差 ≤ 0.497 px（容差 1.0）；标题与正文间距 1.04–1.45 行步（上界 2.0）；禁则字符不当行首；两本参考书的**全部节**都能排版；节 ≤ 50 ms（NFR-003）、窗口 ≤ 20 ms（NFR-004，测 8 个窗口取最差）。`tests/integration/test_scroll_view.py`（19 项）：量子内滚动复用同一张位图、`windowOffset` 落在量子网格上、方向键一行 / 翻屏键一屏 / `]` `[` 换节、章末那一行进入下一章、滚动条比例 = 列长。`tests/integration/test_outline.py`：大纲只列本节标题、高亮跟随偏移。 |
 
 ---
 
@@ -511,16 +555,20 @@ TypographySettings（可序列化为 JSON，持久化）
   ├─ justify: bool                  默认 True
   ├─ kinsoku: bool                  默认 True
   └─ theme: Theme                   LIGHT / SEPIA / DARK
-PageGeometry                      page_size(QSizeF)、content_rect(QRectF)
-LaidOutSection（节排版结果，进 LRU）
+PageGeometry                      page_size(QSizeF)、content_size(QSizeF)、content_origin(QPointF)
+LaidOutSection（一节 = 一列，进 LRU；ADR-016）
   ├─ document: QTextDocument
   ├─ blocks: list[Block]
-  ├─ page_count: int
-  ├─ page_breaks: list[int]        修正后实际生效的分页策略记录（供诊断）
-  └─ build_ms / fix_iterations: float/int   性能与收敛性诊断数据
+  ├─ height: float                  连续列总高（= document.size().height()）
+  ├─ max_offset: float              合法偏移上界 = max(0, height − 页框高)
+  ├─ block_offset(i) / block_height(i)      块 → 偏移（块顶 / 块高）
+  ├─ block_at_offset(offset) -> int          偏移 → 块（顶部不晚于 offset 的最后一个块）
+  └─ build_ms: float                排版耗时（诊断数据；一次 pass，无迭代）
 ReadingPosition（持久化，见 ADR-011）
   └─ (spine_index: int, block_index: int, char_offset: int)
 ```
+
+**这一层没有「页」**：`LaidOutSection` 里既没有 `page_count` 也没有页边界列表——一节就是一条连续列，滚动位置由偏移表达（ADR-016）。窗口位图是渲染期的产物，不进模型。
 
 ### 6.4 模型转换链（单向，无回环）
 
@@ -529,12 +577,12 @@ ZIP 字节
   └─[xml.etree]──> XHTML 树
        └─[sanitizer]──> list[Block]        ← 领域层（纯 Python，可单测）
             └─[kinsoku]──> list[Block]     ← 注入 WJ（纯 Python，可单测）
-                 └─[DocumentBuilder]──> QTextDocument   ← 排版层
-                      └─[Paginator]──> 分页 + 边界修正
-                           └─[PageRenderer]──> QImage    ← 交给 QML
+                 └─[document.build]──> QTextDocument      ← 排版层：按正文栏宽排成一列
+                      └─[LayoutEngine]──> LaidOutSection  ← 列高 + 块↔偏移映射（ADR-016）
+                           └─[renderer.render_window]──> QImage   ← 交给 QML
 ```
 
-**回环禁令**：下层不得感知上层。例如 `sanitizer` 不知道 `QTextDocument` 存在，`PageRenderer` 不知道 EPUB 存在。
+**回环禁令**：下层不得感知上层。例如 `sanitizer` 不知道 `QTextDocument` 存在，`renderer` 不知道 EPUB 存在。
 
 ---
 
@@ -572,66 +620,72 @@ ebook-reader/
 │       │       └── text.py          空白归一化、实体处理、全角/半角
 │       ├── typeset/                 ★ 依赖 QtGui
 │       │   ├── __init__.py
-│       │   ├── settings.py          TypographySettings + 字体回退链
+│       │   ├── settings.py          TypographySettings + PageGeometry + 字体回退链
 │       │   ├── style.py             Block/TypographySettings → QTextBlockFormat/QTextCharFormat
-│       │   ├── builder.py           list[Block] → QTextDocument（ADR-002）
-│       │   ├── paginator.py         分页 + 边界迭代修正（ADR-007）
+│       │   ├── document.py          list[Block] → QTextDocument（ADR-002）
+│       │   ├── engine.py            LayoutEngine：连续列 + LaidOutSection + 节级 LRU（ADR-003 / ADR-016）
 │       │   ├── images.py            ImageCache：懒解码 + LRU（ADR-006）
-│       │   ├── renderer.py          QTextDocument + page → QImage（ADR-008）
-│       │   └── section.py           LaidOutSection + 节级 LRU（ADR-003）
+│       │   └── renderer.py          QTextDocument + offset → 窗口 QImage（ADR-008 / ADR-016）
 │       ├── app/
 │       │   ├── __init__.py
 │       │   ├── controller.py        ReaderController(QObject)：QML 唯一交互面
+│       │   ├── page_item.py         PageItem(QQuickItem)：贴窗口位图、量子内平移
 │       │   ├── settings_store.py    JSON 持久化（XDG 配置目录）
 │       │   └── main.py              QGuiApplication + QQmlApplicationEngine 引导
 │       └── qml/
 │           ├── Main.qml             应用骨架（窗口、快捷键、沉浸模式）
-│           ├── PageView.qml         页面显示 + 翻页动画（ShaderEffect）
+│           ├── ReadingView.qml      正文栏：窗口位图 + 滚动条 + 点击区
 │           ├── TocSidebar.qml       目录树
+│           ├── OutlinePanel.qml     本节大纲（占右栏；FR-018 / ADR-014）
 │           ├── SettingsPanel.qml    字号/字体/行高/主题
-│           ├── StatusBar.qml        页码 / 进度
-│           └── shaders/
-│               └── page_curl.frag   纸张卷曲 shader（P5 阶段）
+│           ├── ReaderMenu.qml       右键「全部操作」菜单（FR-071 / ADR-015）
+│           └── StatusBar.qml        位置百分比 / 常驻「目录」开关
 ├── tests/
 │   ├── unit/                        纯 Python，无 Qt
 │   │   ├── test_epub.py             解析：两本真书、无扩展名、路径、目录树
 │   │   ├── test_sanitizer.py        脏 HTML → Block，字符守恒
 │   │   ├── test_kinsoku.py          WJ 注入正确性
+│   │   ├── test_outline_text.py     大纲标签规则（去掉 WJ、折叠空白；FR-018）
 │   │   └── test_images.py           文件头尺寸预读
 │   └── integration/                 需 QGuiApplication（offscreen）
-│       ├── conftest.py              QGuiApplication fixture
-│       └── test_typeset.py          排版/分页/渲染/位置恢复（核心 P0 指标）
+│       ├── conftest.py              shell fixture + 共用工具（开窗、点击、等待）
+│       ├── test_typeset.py          连续列：列高 / 块↔偏移 / 窗口渲染 / 图片（核心 P0 指标）
+│       ├── test_scroll_view.py      滚动交互：滚轮 / 按键 / 滚动条 / 量子内复用位图
+│       ├── test_layout.py           三栏布局算术（ADR-014）
+│       ├── test_toc_panel.py        目录栏常驻 + 状态栏开关（FR-013）
+│       ├── test_outline.py          大纲只列本节标题（FR-018）
+│       └── test_menu.py             右键菜单入口/内容/点击生效（FR-071）
 ├── pyproject.toml                   项目元数据 + 依赖 + pytest 配置
 └── README.md
 ```
 
 ### 7.2 模块职责与规模预算
 
-| 模块 | 职责 | 依赖 | 预算行数 | 对应需求 |
+| 模块 | 职责 | 依赖 | 行数（`wc -l` 实测） | 对应需求 |
 |---|---|---|---|---|
-| `domain/models.py` | 数据契约 | stdlib | 150 | — |
-| `domain/epub/container.py` | 定位 OPF | stdlib | 40 | FR-002 |
-| `domain/epub/opf.py` | 元数据/清单/spine | stdlib | 130 | FR-003, FR-004 |
-| `domain/epub/toc.py` | nav + ncx 目录树 | stdlib | 160 | FR-010~013 |
-| `domain/epub/paths.py` | 路径归一化 | stdlib | 60 | FR-005, FR-006 |
+| `domain/models.py` | 数据契约（Block/Span/ImageRef/Book + BlockKind/BlockAlign） | stdlib | 160 | — |
+| `domain/errors.py` | 异常层次 | stdlib | 31 | — |
+| `domain/epub/container.py` | 定位 OPF | stdlib | 51 | FR-002 |
+| `domain/epub/opf.py` | 元数据/清单/spine | stdlib | 187 | FR-003, FR-004 |
+| `domain/epub/toc.py` | nav + ncx 目录树 | stdlib | 126 | FR-010~013 |
+| `domain/epub/paths.py` | 路径归一化 | stdlib | 62 | FR-005, FR-006 |
 | `domain/epub/images.py` | 尺寸预读 | stdlib | 110 | ADR-006 |
-| `domain/epub/book.py` | 组装 + 统一接口 | stdlib | 120 | FR-007 |
-| `domain/html/sanitizer.py` | **核心**：脏 HTML → Block | stdlib | 350 | FR-020~027 |
-| `domain/html/kinsoku.py` | **核心**：WJ 注入 | stdlib | 110 | FR-031 |
-| `domain/html/text.py` | 空白/实体 | stdlib | 80 | FR-028 |
-| `typeset/settings.py` | 排版设置 | QtGui | 120 | FR-032~037 |
-| `typeset/style.py` | Block → 格式对象 | QtGui | 180 | ADR-002 |
-| `typeset/builder.py` | Block → QTextDocument | QtGui | 200 | ADR-002 |
-| `typeset/paginator.py` | **核心**：分页 + 修正 | QtGui | 180 | FR-050~053, ADR-007 |
-| `typeset/images.py` | **核心**：懒解码 + LRU | QtGui | 150 | FR-054, ADR-006 |
-| `typeset/renderer.py` | 页 → QImage | QtGui | 120 | FR-056~058 |
-| `typeset/section.py` | 节 LRU | QtGui | 130 | ADR-003 |
-| `app/controller.py` | 状态机 + QML 接口 | QtCore | 320 | FR-060~067 |
-| `app/settings_store.py` | JSON 持久化 | stdlib | 110 | FR-080~083 |
+| `domain/epub/book.py` | 组装 + 统一接口 | stdlib | 265 | FR-007 |
+| `domain/html/sanitizer.py` | **核心**：脏 HTML → Block | stdlib | 668 | FR-020~027 |
+| `domain/html/kinsoku.py` | **核心**：WJ 注入 | stdlib | 108 | FR-031 |
+| `typeset/settings.py` | 排版设置 + `PageGeometry` | QtGui | 293 | FR-032~037 |
+| `typeset/style.py` | Block → 格式对象 | QtGui | 256 | ADR-002 |
+| `typeset/document.py` | Block → QTextDocument | QtGui | 145 | ADR-002 |
+| `typeset/engine.py` | **核心**：连续列排版 + `LaidOutSection` + 节 LRU | QtGui | 388 | FR-050~053, ADR-003 / ADR-016 |
+| `typeset/images.py` | **核心**：懒解码 + LRU | QtGui | 181 | FR-054, ADR-006 |
+| `typeset/renderer.py` | 窗口 → QImage（量子对齐） | QtGui | 98 | FR-056~058, ADR-008 / ADR-016 |
+| `app/controller.py` | 状态机 + QML 接口 + 窗口位图 LRU | QtCore/QtGui | 1150 | FR-060~067 |
+| `app/page_item.py` | `PageItem`：贴窗口位图、量子内平移 | QtQuick | 137 | FR-056~058, ADR-016 |
+| `app/settings_store.py` | JSON 持久化 | stdlib | 199 | FR-080~083 |
 | `app/main.py` | 启动引导 | QtQml/QtQuick | 110 | FR-001 |
-| QML（6 文件） | 界面 | — | 500 | FR-090~092 |
+| QML（7 文件） | 界面 | — | 1,562 | FR-090~092 |
 
-**合计约 3,200 行**（Python ≈ 2,700 + QML ≈ 500），其中标注「核心」的四个模块是质量与性能的关键路径。
+**合计 6,423 行**（Python 4,861 + QML 1,562），其中标注「核心」的四个模块是质量与性能的关键路径。（表内不含各 `__init__.py` 与 `__main__.py`，它们计入合计。）
 
 ### 7.3 分层依赖铁律（Code Review 检查项）
 
@@ -657,24 +711,24 @@ ebook-reader/
 | 规范化 → list[Block] | 6 ms | 遍历树 + 塌缩无用标签 | — |
 | WJ 注入 | 1 ms | 纯字符串扫描 | ADR-005 |
 | `QTextDocument` 构建 | 6 ms | 100 块 × 行内格式 | — |
-| 首次布局（`setPageSize`） | 12 ms | Qt 断行 + 整形 | NFR-003 |
-| 分页边界迭代修正 | 5 ms | 预期 1–2 轮 × 每轮一次重排 | ADR-007 |
-| 首页光栅化 | 15 ms | 含 0–2 张图片解码 | NFR-004 |
-| **合计** | **55 ms** | 目标 ≤ 50ms（微超即优化） | NFR-003 |
+| 一次列布局 | 12 ms | Qt 断行 + 整形；**不分页、无迭代修正**（ADR-016） | NFR-003 |
+| 首屏窗口光栅化 | 15 ms | 含 0–2 张图片解码 | NFR-004 |
+| **合计** | **50 ms** | 目标 ≤ 50 ms | NFR-003 |
 
 > **注**：目标是「稳态」（字体缓存已热）。首次打开书时字体缓存冷，首节可能达 80–120ms，可接受。
 
-### 8.2 同节内翻页耗时预算（热路径，必须最快）
+### 8.2 同节内一次滚动的耗时预算（热路径，必须最快）
 
 | 步骤 | 预算 |
 |---|---|
-| 页位图 LRU 命中 → 直接返回 | 0.2 ms |
-| 未命中 → 光栅化该页 | 15 ms |
+| 量子内平移（`PageItem.pan`，`drawImage` 源矩形） | 0 ms（不进 Python） |
+| 跨量子且窗口位图 LRU 命中 | 0.2 ms |
+| 跨量子且未命中 → 光栅化该窗口 | 9–17 ms |
 | 更新 QML 纹理 | 1 ms |
-| **合计（命中）** | **~1 ms** |
-| **合计（未命中）** | **~16 ms** |
+| **合计（量子内）** | **≈ 0 ms**（纯 GPU） |
+| **合计（跨量子）** | **≈ 16 ms** |
 
-> 16ms ≈ 一帧（60fps）→ 未命中时会有一次「轻微顿挫」。**对策**：`next_page()` 时预取 `page+2` 与 `page-1` 的位图，使绝大多数翻页落在命中路径。
+> 16 ms ≈ 一帧（60fps）→ 跨量子时会有一次「轻微顿挫」。**对策**：`LayoutEngine.prefetch(section, offset + 一屏)` 预取下一窗口的位图，使绝大多数跨量子落在命中路径；而一屏（约 1300 px）≈ 40 个量子，所以**需要 Python 的帧比例本来就很低**（ADR-016）。
 
 ### 8.3 内存预算
 
@@ -682,12 +736,12 @@ ebook-reader/
 |---|---|---|
 | PySide6 + Qt 基线 | 70 MB | 空载 |
 | 3 个 `QTextDocument`（节 LRU） | 12 MB | 每节约 4MB |
-| 页位图 LRU（5 页 × 4 MB @1×） | 20 MB | HiDPI 2× 时 75MB（需将页数降到 3） |
+| 窗口位图 LRU（`_window_cache`，5 张 × 4 MB @1×） | 20 MB | 每张比页框多 1 个量子；HiDPI 2× 时约 75 MB |
 | 图片解码 LRU | 32 MB | 双限（24 张 / 32MB） |
 | `Block` 模型（3 节） | 3 MB | 纯 Python 对象 |
 | 其他（QML 场景图等） | 13 MB | — |
 | **合计（1× DPI）** | **150 MB** | 目标值 |
-| **合计（2× DPI，页缓存降至 3）** | **185 MB** | 仍在上限内 |
+| **合计（2× DPI，窗口缓存 5 张）** | **185 MB** | 仍在上限内 |
 
 ### 8.4 启动预算
 
@@ -697,8 +751,8 @@ ebook-reader/
 | `QGuiApplication` 创建 | 60 ms |
 | QML 引擎 + 场景图初始化 | 120 ms |
 | 打开书（解析 OPF/目录，不含节排版） | 40 ms |
-| 首节排版 + 光栅化 | 55 ms |
-| **合计** | **455 ms** ✅ 满足 NFR-001（0.5s） |
+| 首节排版成一列 + 首屏光栅化 | 50 ms |
+| **合计** | **450 ms** ✅ 满足 NFR-001（0.5s） |
 
 > **关键设计**：启动时**不解析全部 27 节的 Block**，只解析 OPF/目录 + 首节内容。目录（nav/ncx）是独立小文件，解析成本可忽略，这样目录侧栏可以立刻可用。
 
@@ -706,7 +760,7 @@ ebook-reader/
 
 ## 9. 测试策略
 
-原则：**只测重点核心功能**，快速（≤ 10s）、无 GUI 依赖优先（NFR-023）。不追求覆盖率数字，追求「关键风险点被守住」。
+原则：**只测重点核心功能**，快速、无 GUI 依赖优先（NFR-023 的 10 秒预算针对纯 Python 单元套件，实测 0.95 s；集成套件每项都要真开一次 QML 窗口并打开一本真书，约 0.7 s/项，见 §12.7）。不追求覆盖率数字，追求「关键风险点被守住」。
 
 ### 9.1 单元测试（`tests/unit/`，纯 Python，预期 < 2s）
 
@@ -718,23 +772,35 @@ ebook-reader/
 | `test_sanitizer.py` | ① 脏 HTML（4044 `<b>` + 2303 `<span>` + 554 `<div>`）产生的块数合理；② **字符守恒**：Block 文本总长 vs 原始文本长度差异 < 1%（R-09）；③ 图片块被正确识别（含 `<div><img>` 嵌套）；④ `head/meta/link/style` 不泄漏为文本 | 决定内容是否丢失，是最高风险点 |
 | `test_kinsoku.py` | ① 禁行首字符前确实插入了 WJ；② 禁行尾字符后确实插入了 WJ；③ 无重复注入；④ 注入后**除 WJ 外文本不变**（字符守恒） | 决定排版观感，纯字符串逻辑极易写错 |
 | `test_images.py` | ① JPEG 尺寸预读正确（对 5 张真实图人工核对）；② PNG 尺寸预读正确；③ 损坏数据不抛异常（返回 None） | ADR-006 的基础，错了会导致版面错乱 |
+| `test_outline_text.py` | ① 空白归一化（连续空白 / 换行折叠为单个空格）；② U+2060 被剥离（WJ 只服务于排版，不该出现在读者眼前，FR-109）；③ 长标题**原样保留不截断**（列会换行；「取首句」规则随按页回退一起作废，ADR-016）；④ 空标签 → 空串，面板据此丢掉该行 | 大纲标签的取值规则（FR-018），纯字符串逻辑，错了会直接显在 UI 上 |
 
-**明确不测**：Qt 自身行为（分页数量、断行位置）、QML 渲染、真机 GPU 表现——这些用 P0 手工实测代替。
+**明确不测**：Qt 自身行为（断行位置、整形的像素细节）、QML 渲染、真机 GPU 表现——这些用 P0 手工实测代替。
 
-### 9.2 集成测试（`tests/integration/`，`QT_QPA_PLATFORM=offscreen`，预期 < 8s）
+### 9.2 集成测试（`tests/integration/`，`QT_QPA_PLATFORM=offscreen`，78 项）
 
-只用**一节真实中文内容**跑通端到端链路，并顺带断言性能指标：
+只用**真实中文内容**跑通端到端链路（排版、渲染、控制器与三栏布局），并顺带断言性能指标：
 
 | 测试 | 断言 |
 |---|---|
-| `test_typeset.py::test_build_and_paginate` | 用康波书最大节（22,051 字）构建文档并分页，`page_count >= 2`，耗时 **< 50ms**（NFR-003） |
-| `test_typeset.py::test_render_page` | 渲染第 0 页为 `QImage`，尺寸正确、非全白，耗时 **< 20ms**（NFR-004） |
-| `test_typeset.py::test_page_break_fix_converges` | 含大图的节执行修正，迭代次数 ≤ 8，且修正后**无图片块跨界**（ADR-007） |
-| `test_typeset.py::test_image_cache_lru` | 解码超过上限的图片后，缓存字节数 ≤ 上限（ADR-006） |
-| `test_typeset.py::test_position_roundtrip` | 存 `(节, 块, 偏移)` → 改字号 16→20 → 恢复 → 落在**同一块**（ADR-011） |
-| `test_typeset.py::test_justify_and_kinsoku` | 对含标点的中文段落排版，收集行首字符集合，断言**不含禁行首字符**（FR-031 + ADR-005 联合验证） |
+| `test_typeset.py::test_section_build_stays_within_budget` | 康波书最大节排成一列（先要求列高 > 2 屏，否则这条测试没有意义），耗时 **< 50ms**（NFR-003） |
+| `test_typeset.py::test_window_rendering_stays_within_budget` | 沿列取 8 个窗口（各相隔一屏）渲染，**最差 < 20ms**（NFR-004） |
+| `test_typeset.py::test_rendered_window_has_the_expected_geometry` | 窗口位图 = 页框宽 × (页框高 + 1 量子)；这是「量子内平移」成立的前提（ADR-016） |
+| `test_typeset.py::test_the_column_height_is_one_layout_pass_and_reproducible` | 列高 = `document.size().height()`，且 `clear()` 后重建结果一致——没有迭代修正，结果只由内容与版式决定 |
+| `test_typeset.py::test_the_block_lookup_is_the_last_block_at_or_before_an_offset` | `block_at_offset()` 的语义（块顶可以相同，取不晚于偏移的最后一个块） |
+| `test_typeset.py::test_reading_position_survives_a_font_size_change` | 存 `(节, 块, 偏移)` → 改字号 16→20 → 恢复 → 落在**同一块**（ADR-011 / ADR-016） |
+| `test_typeset.py::test_no_figure_is_squeezed_or_overlapped_by_the_column` | 418 张图在列中的矩形与显示尺寸偏差 ≤ 0.497 px（容差 1.0）——页边界消失后，这是 ADR-007 当年担心的那类版面事故的新防线 |
+| `test_typeset.py::test_a_heading_has_its_text_right_below_it` | 标题与其正文的间距 ≤ 2 行步（实测最差 1.45） |
+| `test_typeset.py::test_no_forbidden_character_starts_a_line` | 中文段落排版后行首**不含禁行首字符**（FR-031 + ADR-005 联合验证） |
+| `test_typeset.py::test_every_section_of_both_books_can_be_laid_out` | 两本参考书的**全部节**都能排成一列（含无标题节、含图节） |
+| `test_typeset.py`（图片缓存 5 项） | 懒解码 + LRU 双限、命中、绝不放大、缺资源返回空（ADR-006） |
+| `test_typeset.py::test_section_cache_evicts_old_sections` | 节 LRU 上限（ADR-003） |
+| `test_scroll_view.py` | ① 方向键一行 / 翻屏键一屏 / `]` `[` 换节 / Home End；② 滚轮按步长滚动；③ **量子内滚动复用同一张位图**（`windowOffset` 不变），跨量子才换图；④ 滚动条比例 = 列长，列装得下一屏时不出现；⑤ 章末那一行真的进入下一章（FR-060~067 / ADR-016） |
+| `test_outline.py` | ① 大纲行 = 本节标题、缩进层级；② 高亮跟随当前偏移；③ 点击跳到该标题的偏移；④ 无标题的节不提供该栏；⑤ 重排（改字号 / 开关侧栏）后按新栏宽重建（FR-018 / FR-019 / ADR-016） |
+| `test_layout.py` | ① 窗口默认尺寸与最小宽度；② 三栏 `x`/`width` 相接、无重叠无缝；③ 交给 Python 的页框 = 正文栏宽；④ 无内容时右栏不出现且宽度归还；⑤ 窄窗口（720）下两栏仍可用；⑥ 设置抽屉不占栏、不动左侧目录、只有它会遮断点击区（FR-019 / FR-062 / ADR-014） |
+| `test_toc_panel.py` | ① 状态栏「目录」按钮**真点击**即显示 / 隐藏，`pageColumnWidth` 与交给 Python 的页框一起变化；② 按钮在页框之外，点击不滚动；③ 无书（或无目录）时置灰且点击不产生副作用；④ **真点击**目录项跳转后左栏仍在、高亮跟随；⑤ 点章节 / 滚动 / 开大纲都不收起目录，只有 `T` / `Esc` 收起（FR-013） |
+| `test_menu.py` | ① 真事件右键在正文 / 目录栏 / 状态栏三处都能弹出，且弹在鼠标处（贴底时上移）；② 菜单列出全部操作（21 行 + 14 个子菜单项，多一行少一行都算失败）；③ 无书时行置灰、已开栏带勾选；④ **真点击**行会真的执行（换章 / 关栏 / 换主题，子菜单两跳全程鼠标）；⑤ 右键点滚动条只弹菜单、同一处左键真的滚动（FR-071） |
 
-> `test_justify_and_kinsoku` 是本套测试中**最有价值的一条**：它把「避头尾是否真的生效」从「肉眼观察」变成「自动化断言」，直接守住 R-01。
+> `test_no_forbidden_character_starts_a_line` 是本套测试中**最有价值的一条**：它把「避头尾是否真的生效」从「肉眼观察」变成「自动化断言」，直接守住 R-01。
 
 ### 9.3 手工实测清单（P0，不进自动化）
 
@@ -742,11 +808,14 @@ ebook-reader/
 |---|---|---|
 | 中文两端对齐观感 | 打开康波书正文，目视 | 右边界齐平，字距无明显突兀 |
 | 首行缩进 / 行距 / 页边距 | 目视 | 接近纸质书 |
-| 图片显示与不被切断 | 翻 30 页目视 | 无切断、无变形、无模糊 |
+| 图片显示与不变形 | 连续滚动 30 屏目视 | 无变形、无模糊；窗口边缘截开的图换到别的滚动位置能看到全图（窗口只是取景框，ADR-016） |
 | 内存 | `cat /proc/<pid>/status \| grep VmRSS` | ≤ 200MB |
 | 启动 | `time ./run.sh` | ≤ 1.0s |
-| 无 GPU 回退 | `QT_QUICK_BACKEND=software` 启动 | 正常显示与翻页 |
+| 无 GPU 回退 | `QT_QUICK_BACKEND=software` 启动 | 正常显示与滚动 |
 | Wayland / X11 | 分别启动 | 都正常 |
+| 三栏布局 | 开目录 + 大纲，再调整窗口大小到 720 宽 | 三栏都不重叠、正文仍可读、滚轮与点击区有效、阅读位置不变 |
+| 状态栏进度 | 打开康波书，滚过一整章 | 「本卷 x% · 全书 y%」随滚动单调增长；一章在一屏内读完即显示「本卷 100%」（FR-072 / FR-075） |
+| 节末「下一章」一行 | 滚到章末 | 出现「下一章 · 〈标题〉」；点它才换章，不点就停在本章末尾；最后一章不出现该行（FR-074） |
 
 ### 9.4 运行方式
 
@@ -770,13 +839,13 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q
 
 | 阶段 | 内容 | 产物 / 验收 | 对应需求 | 状态 |
 |---|---|---|---|---|
-| **P0 验证** | 装环境；用真书跑通「解析一节 → 建文档 → 分页 → 渲染」；测性能与禁忌指标 | 性能达标 + 中文排版目视合格；**门禁**：不达标则回退 ADR-001 后备方案 | NFR-001/003/004, R-01/02/05 | ✅ 见第 12 节 |
+| **P0 验证** | 装环境；用真书跑通「解析一节 → 建文档 → 排版 → 渲染」；测性能与禁忌指标 | 性能达标 + 中文排版目视合格；**门禁**：不达标则回退 ADR-001 后备方案 | NFR-001/003/004, R-01/02/05 | ✅ 见第 12 节（当时为分页原型，ADR-016 后同一链路改为「排成一列 → 渲染窗口」） |
 | **P1 领域层** | EPUB 解析（container/OPF/paths/images/book）、目录（nav+ncx）、XHTML→Block 规范化、WJ 注入 | `tests/unit` 全绿（两本真书） | FR-002~007, FR-010~013, FR-020~028 | ✅ |
-| **P2 排版层** | 设置与样式、文档构建、分页修正、图片懒解码 LRU、页渲染、节 LRU | `tests/integration` 全绿；任意节可渲染为图 | FR-030~039, FR-050~059 | ✅ |
-| **P3 应用层 + QML 骨架** | `ReaderController`（翻页/跳转/进度）、`main.py` 引导、`Main.qml`/`PageView.qml`/`StatusBar.qml`、快捷键、位置记忆 | **两本目标书可连续读完**（v1 最小可用） | FR-001, FR-060~062, FR-064, FR-067, FR-080, FR-083 | ✅ |
-| **P4 界面完善** | 目录侧栏、设置面板（字号/字体/行高/边距/主题）、沉浸模式、窗口状态记忆、脚注跳转 | 达到「好用」 | FR-014~017, FR-034~037, FR-065~066, FR-081~082, FR-090, FR-092 | 🟡 侧栏与设置面板已完成；沉浸模式与脚注跳转待做 |
-| **P5 中文排版美化** | 标点挤压、字体栈精调、标点全角/半角、图片与图注样式、孤行控制 | 观感超过 Foliate 默认 | FR-040~041, FR-053 | ⬜ |
-| **P6 翻页动画** | 三档：① 位移淡入（已实现）② 3D 翻转+阴影 ③ 纸张卷曲（shader，`ShaderEffectSource` + `ShaderEffect`） | 60fps 稳定（NFR-005） | FR-092, G6 | 🟡 档①已完成 |
+| **P2 排版层** | 设置与样式、文档构建、连续列排版（ADR-016）、图片懒解码 LRU、窗口渲染、节 LRU | `tests/integration` 全绿；任意节的任意偏移可渲染为窗口位图 | FR-030~039, FR-050~059 | ✅ |
+| **P3 应用层 + QML 骨架** | `ReaderController`（滚动/跳转/进度）、`main.py` 引导、`Main.qml`/`ReadingView.qml`/`PageItem.qml`/`StatusBar.qml`、快捷键、位置记忆 | **两本目标书可连续读完**（v1 最小可用） | FR-001, FR-060~062, FR-064, FR-067, FR-080, FR-083 | ✅ |
+| **P4 界面完善** | 目录侧栏、**本节大纲栏（三栏布局）**、**右键「全部操作」菜单**、设置面板（字号/字体/行高/边距/主题）、沉浸模式、窗口状态记忆、脚注跳转 | 达到「好用」 | FR-014~019, FR-034~037, FR-065~066, FR-071, FR-081~082, FR-090, FR-092 | 🟡 目录、大纲（ADR-014）、右键菜单（ADR-015）与设置面板已完成；沉浸模式与脚注跳转待做 |
+| **P5 中文排版美化** | 标点挤压、字体栈精调、标点全角/半角、图片与图注样式（「孤行控制」已随页边界一起消失，ADR-016） | 观感超过 Foliate 默认 | FR-040~041, FR-053 | ⬜ |
+| **P6 过渡动画** | 三档：① 位移淡入（已实现）② 3D 翻转+阴影 ③ 纸张卷曲（shader，`ShaderEffectSource` + `ShaderEffect`）。**连续列下滚动本身不需要动画**，这三档只对「换节 / 跳转」这类整屏切换成立 | 60fps 稳定（NFR-005） | FR-092, G6 | 🟡 档①已完成 |
 | **P7 打包与分发** | PyInstaller spec + `build.sh`、可控剪裁（`bundle.py`）、`dist/` 双产物、`.desktop`、`xdg-mime` 关联 | 双击 `.epub` 用本应用打开 | NFR-011, R-07 | 🟡 见 §12.8：二进制与 `.desktop` 已完成，单文件版 62.1 MB 达标；AppImage 与 Windows 脚本待做 |
 | **P8 可选增强** | 全书搜索、进度条拖动、最近书籍、文本选择复制 | P2 需求 | FR-068~070, FR-084 | ⬜ |
 
@@ -794,14 +863,14 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q
 | 检查项 | 结论 |
 |---|---|
 | 每个 P0 需求是否都有对应的架构模块承担责任？ | ✅ 见 7.2 模块表的「对应需求」列 |
-| 是否为每个 P0 风险设了缓解措施？ | ✅ R-01→ADR-005，R-02/R-03→ADR-007，R-05→ADR-006，R-08→ADR-008，R-10→FR-051 |
-| 是否所有性能指标都可测量？ | ✅ 见 8 节预算分解，每项都有测量方法 |
+| 是否为每个 P0 风险设了缓解措施？ | ✅ R-01→ADR-005，R-02/R-03（页边界切割图文）→ADR-016（连续列取消页边界，问题由「需修正」变为「不存在」），R-05→ADR-006，R-08→ADR-008，R-10→FR-051 |
+| 是否所有性能指标都可测量？ | ✅ 见 8 节预算分解，每项都有测量方法（集成测试直接断言 NFR-003/004） |
 | 是否避免了「架构上必然失败」的方案？ | ✅ 见 3.3 淘汰过程（E/F 因 Windows + 库升级免疫被结构性排除） |
 | 是否有逃生舱以防关键技术被证伪？ | ✅ QTextDocument→可替换 Layout（ADR-001）；`BookSource`→可扩展格式（NFR-031）；`QImage`→可换 RHI 渲染（NFR-032） |
 | 依赖是否最小化？ | ✅ 运行时 1 个依赖（ADR-009） |
 | 核心逻辑是否可无 GUI 测试？ | ✅ domain 层零 Qt（ADR-012），测试扫描验证 |
-| 已知的功能缺口是否被诚实记录？ | ✅ 竖排/ruby/表格/手机 → «Out of Scope»；跨节滚动 → ADR-004 明示不做 |
-| 架构决策是否可追溯？ | ✅ 13 条 ADR，每条含背景/决策/理由/已否决方案/代价/验证 |
+| 已知的功能缺口是否被诚实记录？ | ✅ 竖排/ruby/表格/手机 → «Out of Scope»；**跨节不拼接**（换节即换列）→ ADR-016 明示不做 |
+| 架构决策是否可追溯？ | ✅ 16 条 ADR，每条含背景/决策/理由/已否决方案/代价/验证（ADR-004 与 ADR-007 由 ADR-016 取代） |
 | 是否有明确的止损路径？ | ✅ P0 门禁 + ADR-001 后备方案 |
 
 ---
@@ -812,37 +881,41 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q
 
 环境：Manjaro / KDE / Wayland，Python 3.14.7，PySide6-Essentials 6.11.2，`QT_QPA_PLATFORM=offscreen`，页面 1000×1346，字号 18px，行距 1.75。
 
+> **怎么读这一节**：下面的记录写于**分页原型期**（当时的 ADR-007）。其中的「页」对应今天的「窗口」，「分页」对应「排成一列 + 按偏移取窗口」（ADR-016）；随页边界一起消失的量（页数、页边界切断）在 ADR-016 一节给出了替代的度量与防线。实测数字保留为历史基线，未重新测量。
+
 ### 12.1 性能实测
 
 | 指标 | 目标 | 实测 | 结论 |
 |---|---|---|---|
 | NFR-003 单节排版（中位数，27 节） | ≤ 30 ms | **14.7 ms** | ✅ |
-| NFR-003 最大节（261 块 / 32 页） | ≤ 50 ms | 86.3 ms（**首次**布局，见下） | ⚠️ 已解释 |
-| NFR-004 单页光栅化（中位数） | ≤ 15 ms | **8.1 ms** | ✅ |
-| NFR-004 单页光栅化（最差） | ≤ 20 ms | 17.0 ms | ✅ |
+| NFR-003 最大节（261 块；当时按 32 页切分） | ≤ 50 ms | 86.3 ms（**首次**布局，见下） | ⚠️ 已解释 |
+| NFR-004 单页光栅化（中位数；今为窗口光栅化） | ≤ 15 ms | **8.1 ms** | ✅ |
+| NFR-004 单页光栅化（最差；今为窗口光栅化） | ≤ 20 ms | 17.0 ms | ✅ |
 | NFR-008 全书解析（27 节 / 23.8 万字 / 408 图） | ≤ 200 ms | **118 ms** | ✅ |
 | 图片表头探测（408 张） | — | **16 ms**（优化前 383 ms） | ✅ |
 | NFR-007 图片缓存峰值 | ≤ 30 MB | 17–20 张 / 27.3 MB | ✅ |
 | NFR-006 单张图片解码 | ≤ 25 ms | < 10 ms（按显示尺寸解码） | ✅ |
 
-**关于「首次布局 86 ms」**：逐段计时显示，进程内**第一个**大节的首轮布局需要 49.6 ms 用于字形整形缓存预热，之后同类大节仅需 12.6 ms。这是一次性成本，发生在启动路径上，被 NFR-001 的 455 ms 启动预算吸收。故 NFR-003 的 30 ms 指标按**稳态**考核（测试中先布局一个小节预热，与真实启动顺序一致）。
+**关于「首次布局 86 ms」**：逐段计时显示，进程内**第一个**大节的首轮布局需要 49.6 ms 用于字形整形缓存预热，之后同类大节仅需 12.6 ms。这是一次性成本，发生在启动路径上，被 NFR-001 的 450 ms 启动预算吸收。故 NFR-003 的 30 ms 指标按**稳态**考核（测试中先布局一个小节预热，与真实启动顺序一致）。
 
 ### 12.2 质量实测
 
 | 指标 | 目标 | 实测 | 结论 |
 |---|---|---|---|
 | FR-031 避头尾：违法行首标点数 | 0 | **645 行 → 0** | ✅ |
-| FR-052 图片被页边界切断数 | 0 | **全书 428 页 → 0** | ✅ |
-| FR-053 标题成为页末孤立块 | 0 | **0** | ✅ |
-| ADR-007 分页修正收敛 | 全部收敛 | **27/27 收敛，均为 2 遍** | ✅ |
+| FR-052 图片被页边界切断数（指标已随 ADR-016 废除） | 0 | **全书 428 页 → 0** | ⬜ 已废除 |
+| FR-053 标题成为页末孤立块（指标已随 ADR-016 废除） | 0 | **0** | ⬜ 已废除 |
+| ADR-007 分页修正收敛（ADR-007 已作废） | 全部收敛 | **27/27 收敛，均为 2 遍** | ⬜ 已废除 |
 | R-09 字符守恒（最大节） | 差异 < 1% | **< 1%**（且在去掉块间连接空格后进一步下降） | ✅ |
 | ADR-006 表头探测与实际尺寸一致 | 完全一致 | **461 张图 0 处不符** | ✅ |
 | 图片解码失败数 | 0 | **0** | ✅ |
-| 渲染页非空白 | 是 | 抽样 801 个非白像素 | ✅ |
+| 渲染页 / 窗口非空白 | 是 | 抽样 801 个非白像素 | ✅ |
 
 **「645 行 0 违规」是本项目最重要的一条实测结论**：把风险 R-01（Qt 内建避头尾不可靠）从「担心」变成了「已证伪且可自动回归」。该断言已固化为集成测试，任何破坏避头尾的改动都会立刻失败。
 
-### 12.3 开发过程中发现并修正的 7 个真实问题
+**页边界类指标的去向（ADR-016）**：连续列没有页边界，于是「图片被页边界切断」与「标题成为页末孤立块」这两条**整类消失**——ADR-007 的迭代修正机制也随之删除。它们的位置由两条新断言接管：`test_no_figure_is_squeezed_or_overlapped_by_the_column`（418 张图在列内的矩形偏差 ≤ 0.497 px，容差 1.0）与 `test_a_heading_has_its_text_right_below_it`（标题与其正文的间距 ≤ 2 行步，实测最差 1.45）。
+
+### 12.3 开发过程中发现并修正的 15 个真实问题
 
 这些问题都是**实测才暴露**的，全部已修复并加了防护（注释或测试）：
 
@@ -854,7 +927,15 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q
 | 4 | 封面节 1 张图占 2 页，含图章节页数虚高 18% | `ProportionalHeight` 行高被乘到**含图片的行**上：800 px 的图变成 1400 px 的行 | 图片块改用 `SingleHeight` | 图片不跨界断言 + 页数回归 |
 | 5 | 图注居中失效 | 居中段落仍带首行缩进，观感错误 | 居中块缩进置 0 | — |
 | 6 | 侧栏总是显示、滑入动画无效 | 同一轴同时设置 `anchors.left` 与 `x`，锚点静默覆盖 `x` | 只锚定垂直方向，水平用 `x` | 截图验证 |
-| 7 | 页面被缩放到 0.4 倍、四周大白边 | `setViewSize` 传的是窗口宽度，而阅读区被两侧面板挤窄 | 面板改为浮层覆盖，页面几何只由窗口决定（顺带消除了开面板导致的重排） | 截图验证 |
+| 7 | 页面被缩放到 0.4 倍、四周大白边 | `setViewSize` 传的是窗口宽度，而阅读区被两侧面板挤窄 | 面板改为浮层覆盖，页面几何只由窗口决定（顺带消除了开面板导致的重排）。**该决策已于 ADR-014 修正为三栏平铺** | 截图验证 + `test_layout.py` |
+| 8 | 目录 / 大纲占位后，正文左右点击区不再翻页 | 「点击面板外关闭面板」的全屏遮罩条件是 `visible: cTocOpen \|\| cSettingsOpen`。面板浮层时遮罩不影响正文，占位后遮罩横跨整窗，把翻页点击区吃掉了 | 遮罩只在设置抽屉打开时启用，并移入正文栏内部，覆盖范围与「抽屉遮住了哪块文字」一致 | `test_layout.py` 断言开目录/大纲时遮罩不可见、开设置时才可见 |
+| 9 | 开关侧栏后正文仍按**旧**宽度排版，切换一瞬间与之后都不对 | `onCTocOpenChanged` 处理器在**变更级联中途**执行，此时 `pageColumnWidth`、`sidePanelWidth`、`openColumns` 这些派生绑定还没重算，读到的是上一轮的值 | 处理器改为 `Qt.callLater(...)`，推迟到本轮事件循环末尾（派生值已稳定），并不再经过 140 ms 防抖 | `test_layout.py` 断言 `_view_size.width() == pageColumnWidth` |
+| 10 | 关闭书籍后右侧大纲栏不消失，仍占一栏空白 | `outlineAvailable` 的 notify 是 `pageChanged`，而 `closeBook()` 只发 `bookChanged`/`tocChanged`/`layoutChanged`，绑定从未重算，一直沿用关闭前的答案 | `closeBook()` 补发 `pageChanged`（「已经没有页了」本身就是一次页变化），并同时清掉大纲缓存 | `test_layout.py` 断言关书后右栏消失且宽度归还正文 |
+| 11 | 大纲文案里混入不可见字符 U+2060 | 大纲取的是 Block 文本，而 Block 文本里已按 ADR-005 注入了 WORD JOINER；它是排版用字符，出现在 UI 会让标签与正文看起来不一致 | 取标题时先剥掉 U+2060 并归一化空白 | `test_outline_text.py` + `test_outline.py` 双向断言 |
+| 12 | 新增的 `ContextMenu.qml` 一被 `Main.qml` 引用就报 `Type cannot be created in QML`，而该文件单独加载完全正常 | **类型名撞车**：Qt 的 FluentWinUI3 风格在隐式导入的模块里注册了单例 `ContextMenu`（`QtQuick/Controls/FluentWinUI3/impl/qmldir`），该名字优先于同目录同名文件，于是解析到那个不可创建的虚类型 | 组件改名 `ReaderMenu.qml`（并保留 `objectName` 供测试查找） | `test_menu.py` 找不到 `readerMenu` 即整组失败 |
+| 13 | 深色 / 米色主题下右键菜单仍是**白底黑字**的浮空白块 | 活动样式是 **Fusion**，其菜单底用 `palette.base`、分隔线用固定的 `Fusion.darkShade`、箭头是位图；而本应用的主题色只写进面板自己的 QML，从未写进调色板，浮层因此拿不到主题色 | 菜单显式画背景 / 分隔线 / 三角箭头（面板也是这么做的），并把 `palette.base/text/highlight/…` 一并设上，供样式自绘的滚动指示器使用 | 浅色 / 深色两张真实截图逐点核对像素颜色 |
+| 14 | 点目录项跳转后左栏**自己消失**，想连着看两章就得每次重按 `T`；文档则写着「点击后不收起」（FR-015 已由 ADR-014 作废、FR-018、README 三处一致） | 浮层时代的规则留在代码里没删：`goToTocRow()` 末尾仍写 `self._toc_visible = False; layoutChanged.emit()`，而 ADR-014 把面板改成占邻栏之后，这条「点完就收」已经不成立 | 删掉那两行（`goToSection` 自己会发 `tocChanged`，高亮照常跟随） | `test_toc_panel.py` 用**真点击**目录项断言左栏仍在且高亮跟随；`test_layout.py` / `test_outline.py` 断言开设置抽屉后 `tocVisible` 仍为真 |
+| 15 | 按 `S` 打开设置抽屉，左侧目录栏**一起被收走**——读者只是想调字号，地图却没了 | 同样是浮层时代的耦合：`toggleSettings()` 打开时把 `_toc_visible` 与 `_outline_visible` 一起置假；三栏平铺后抽屉浮在**右侧**，与左侧目录并不争空间 | `toggleSettings()` 只让同侧的大纲栏让位；点击抽屉旁边改调新增的 `closeSettings()`（原来调 `closePanels()`，会顺手关掉目录） | `test_outline.py` 断言开设置后 `tocVisible` 仍为真、`closeSettings()` 后仍为真；`test_toc_panel.py` 断言 `S` 之后左栏仍在 |
 
 ### 12.4 启动期 QML「读取 null 属性」错误的根因与修法（重要）
 
@@ -865,6 +946,8 @@ TocSidebar.qml:40: TypeError: Cannot read property 'panelTextColor' of null
 Main.qml:43: TypeError: Cannot call method 'setViewSize' of null
 PageView.qml:23: Unable to assign null to QImage
 ```
+
+> （`PageView.qml` 是当时阅读组件的文件名；ADR-016 后它叫 `ReadingView.qml`。这段 stderr 按原样保留。）
 
 界面功能看起来正常（颜色、目录、主题都对），因为绑定在 `ctl` 到位后会重新求值——但每次启动都刷一堆错误，不可接受。
 
@@ -941,13 +1024,15 @@ PageView.qml:23: Unable to assign null to QImage
 
 | 项 | 结果 |
 |---|---|
-| 测试总数 | **106** |
-| 全量耗时 | **2.32 s**（NFR-023 要求 ≤ 10 s） |
-| 单元测试（纯 Python，无 Qt） | 85 项 |
-| 集成测试（offscreen Qt） | 21 项 |
-| 结果 | **全部通过** |
+| 测试总数 | **171**（单元 93 + 集成 78），`pytest --collect-only -q` 计数 |
+| 单元测试（纯 Python，无 Qt） | **93 项 / 0.92 s**（含解释器启动）——NFR-023 的 10 秒预算指的就是这一套 |
+| 集成测试（offscreen Qt） | **78 项 / 33.05 s**——每项都要真开一次 QML 窗口并打开一本真书，单价约 0.42 s |
+| 全量耗时 | **33.6 s**（一次跑完 171 项，实测 33.57 s） |
+| 结果 | **全部通过**（ADR-016 改写 `test_typeset.py`、新增 `test_scroll_view.py` 之后重测） |
 
-集成测试中直接断言了本文档的性能指标（NFR-003 ≤ 50 ms、NFR-004 ≤ 20 ms）与质量指标（图片不切断、0 个违法行首、位置跨字号可恢复），使文档与代码不会脱节。
+> 对比分页原型期（156 项 / 12.25 s）：集成项从 60 涨到 78（`test_scroll_view.py` 19 项、`test_outline.py` 从按页回退改为一套标题断言），单价也从 0.7 s 降到 0.43 s——因为连续列不再需要「逐页走完 + 分页修正」这类串行开销。§9.2 的原估计（「预期 < 8s」）同样是只有 3 个集成模块时的数字，已被实测取代。
+
+集成测试中直接断言了本文档的性能指标（NFR-003 ≤ 50 ms、NFR-004 ≤ 20 ms）与质量指标（图片不被列挤扁或重叠、0 个违法行首、位置跨字号可恢复），使文档与代码不会脱节。三栏布局同样如此：`test_layout.py` 把 ADR-014 的算术（三栏相接、页框 = 正文栏宽）变成断言，`test_outline.py` 把 FR-018 的规则（大纲只列本节标题、高亮跟随偏移）钉在两本真书上，`test_menu.py` 把 ADR-015 的入口（右键、21 行每一项都在、点了真的生效）钉成断言，`test_toc_panel.py` 把 FR-013 的「常驻 + 一键开关」钉成断言——包括**真点击**状态栏按钮与**真点击**目录项，`test_scroll_view.py` 则把 ADR-016 的量子复用（同一窗口位图内滚动不换图）钉成断言。
 
 
 ### 12.8 打包实测（P7）
@@ -960,8 +1045,8 @@ PageView.qml:23: Unable to assign null to QImage
 | 剪裁 | `packaging/bundle.py`：按表剔除 **1303** 个数据项 + **44** 个二进制项，再按可达性剪除 **63** 个孤立共享库 |
 | 产物 | `dist/ebook-reader` 62.1 MB（单文件）/ `dist/ebook-reader-dir/` 169.4 MB（文件夹） |
 | 依赖完整性 | `bundle.py check`：218 个 ELF、**0 个未解析库**、**0 个未解析 QML import** |
-| 真实 Wayland 实测 | 三种启动方式（文件夹版带书 / 文件夹版无参数 / 单文件版带书）均 0 错误，`first page ready` 86–92 ms |
-| 回归 | 单元 + 集成测试 **106 项全绿** |
+| 真实 Wayland 实测 | 三种启动方式（文件夹版带书 / 文件夹版无参数 / 单文件版带书）均 0 错误。加入右键菜单、目录栏默认展开、状态栏「目录」开关与「目录不自动收起」之后用 `packaging/build.sh` 的冒烟测试复测：三种方式仍 0 错误，启动到首屏日志 0.32 s（文件夹）/ 1.00 s（单文件），首屏就绪 108 ms / 102 ms —— 此前记录的 86–92 ms 是目录栏默认收起时的版本，ADR-015 让开书时多出一次重排，代价即在此处可见（NFR-001 仍余量充足）。**注**：该次复测在分页原型期，日志行为 `first page ready`；ADR-016 之后同一处日志已改为 `first window ready`（首屏窗口就绪），时间量不变 |
+| 回归 | 单元 + 集成测试 **156 项全绿**（0.95 s + 11.85 s；当时的分页原型期数量，ADR-016 后为 171 项 / 0.92 s + 33.05 s，见 §12.7） |
 
 **剪裁为什么用「可达性」而不是手写清单。** `Qt/plugins/**` 与 `Qt/qml/**` 都是运行时按路径 / `dlopen` 加载的，没有任何 `DT_NEEDED` 指向它们，因此无法用依赖图自动发现，只能显式列在 `PLUGIN_FAMILIES` / `PLUGIN_FILES` / `QML_MODULES` 三张表里。反过来，这份「剔除」一旦生效，**只被它们引用的共享库就变成了孤儿**（典型例子：`libqgtk3.so` 一个插件拖进整个 GTK 栈，以及被 GTK 链顺带拖进来的系统 `libicudata.so.78`——与 venv 自带的 `.73` 重复）。因此第二层用可达性遍历：以 `Qt/plugins/**`、`Qt/qml/**`、`PySide6/*.abi3.so`、`lib-dynload/**` 为根，沿 `DT_NEEDED` 求闭包，只在 `PySide6/Qt/lib/` 与 `_internal/` 顶层两个目录里剪除不可达的库。剪裁范围刻意收窄，是因为插件 / QML 模块 / Python 扩展都不在依赖图里，全量剪除会把它们删光。
 
