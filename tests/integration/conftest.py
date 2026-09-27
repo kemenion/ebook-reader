@@ -142,7 +142,36 @@ def press(window, name: str) -> None:
     pump(120)
 
 
-def wheel(window, position: tuple[int, int], notches: float = 1, pixels: int = 0) -> None:
+def touch_device():
+    """A pointing device of the kind Qt's Wayland plugin reports the wheel from.
+
+    On Wayland the compositor's ``wl_pointer.axis`` events carry no device of their
+    own, so Qt attributes every one of them to the seat's pointer device - which it
+    registers as a TouchPad.  ``WheelHandler`` accepts ``Mouse`` alone unless it is
+    told otherwise, so the reader's own mouse wheel does nothing there while ``↓``
+    works (defect 24).  Handing an event this device to the shell reproduces that on
+    any platform, offscreen included.
+    """
+    from PySide6.QtGui import QInputDevice, QPointingDevice
+
+    return QPointingDevice(
+        "touchpad",
+        8589934592,                       # the id Qt gives the seat's pointer
+        QInputDevice.DeviceType.TouchPad,
+        QPointingDevice.PointerType.Finger,
+        QInputDevice.Capability.Position,
+        10,
+        0,
+    )
+
+
+def wheel(
+    window,
+    position: tuple[int, int],
+    notches: float = 1,
+    pixels: int = 0,
+    device=None,
+) -> None:
     """One wheel event at *position*; positive notches scroll down (FR-063).
 
     A mouse sends one notch - 120 units of angle - which is what ``notches`` builds,
@@ -151,7 +180,8 @@ def wheel(window, position: tuple[int, int], notches: float = 1, pixels: int = 0
     wheel in a smooth-scrolling session sends screen pixels with no angle at all,
     which is what ``pixels`` builds - and it is the shape that used to scroll by
     nothing.  The two are separate arguments because the controller deliberately
-    treats them differently; a test wanting both can pass both.
+    treats them differently; a test wanting both can pass both.  *device* names the
+    pointing device the event came from - see :func:`touch_device`.
 
     Sent to the window rather than to an item, so the same hit-testing decides where
     it lands as for a reader's own wheel.
@@ -159,6 +189,9 @@ def wheel(window, position: tuple[int, int], notches: float = 1, pixels: int = 0
     from PySide6.QtGui import QGuiApplication, QWheelEvent
 
     point = QPointF(*position)
+    arguments = {}
+    if device is not None:
+        arguments["device"] = device
     event = QWheelEvent(
         point,
         point,
@@ -168,6 +201,7 @@ def wheel(window, position: tuple[int, int], notches: float = 1, pixels: int = 0
         Qt.NoModifier,
         Qt.ScrollUpdate,
         False,
+        **arguments,
     )
     QGuiApplication.sendEvent(window, event)
     pump(120)

@@ -33,6 +33,7 @@ from conftest import (
     pump,
     shortcut_keys,
     shortcut_sequences,
+    touch_device,
     visible,
     wheel,
 )
@@ -361,6 +362,27 @@ def test_a_partial_notch_scrolls_by_its_own_fraction(shell, kangpo_path: Path) -
     assert controller.scrollOffset == pytest.approx(controller.wheelStep / 2, abs=TOLERANCE)
 
 
+def test_a_wheel_from_a_touchpad_device_scrolls_the_text(shell, kangpo_path: Path) -> None:
+    """The regression: on Wayland the reader's own wheel moved nothing (defect 24).
+
+    Qt registers the seat's pointer as a TouchPad there, so every wheel event arrives
+    attributed to a TouchPad - and ``WheelHandler``'s default ``acceptedDevices`` is
+    Mouse alone, which made the handler decline each one *before* ``onWheel`` ran:
+    the reader's mouse did nothing at all while ``↓`` scrolled, and no amount of
+    arithmetic in the controller could see it.  The event shape is what the test
+    drives, not the platform, so this fails on any machine that loses the device.
+    """
+    _, window, controller = shell
+    _open_long_section(controller, kangpo_path)
+    page = item(window, "pageArea")
+
+    wheel(window, at(page, page.width() / 2, 400), device=touch_device())
+    assert controller.scrollOffset == pytest.approx(controller.wheelStep, abs=TOLERANCE)
+
+    wheel(window, at(page, page.width() / 2, 400), -1, device=touch_device())
+    assert controller.scrollOffset == pytest.approx(0.0, abs=TOLERANCE)
+
+
 def test_a_click_on_the_text_does_not_move_it(shell, kangpo_path: Path) -> None:
     """The click zones are gone with the pages; a click on the text is not a turn."""
     _, window, controller = shell
@@ -473,6 +495,27 @@ def test_the_last_chapter_announces_nothing(shell, kangpo_path: Path) -> None:
     pump(240)
     assert not controller.hasNextSection
     assert not visible(window, "nextChapterStrip")
+
+
+def test_the_next_chapter_is_named_even_when_the_contents_never_names_it(
+    shell, linqi_path: Path
+) -> None:
+    """The line names the chapter that follows, whoever named it (FR-074 / FR-012).
+
+    The omnibus names three of its 135 sections in its NCX, so every other 「下一章」
+    line used to be silent - and a line that names nothing is not a way on.  The
+    section that follows now names itself.
+    """
+    _, window, controller = shell
+    assert controller.openBook(str(linqi_path))
+    pump(RESIZE_DEBOUNCE_MS + 100)
+
+    controller.goToSection(4)                     # a section the NCX does not name
+    controller.scrollToBottom()
+    pump(240)
+
+    assert controller.nextSectionTitle == "目录"    # the next section's own first line
+    assert visible(window, "nextChapterStrip")
 
 
 # --------------------------------------------------------------- the scroll bar

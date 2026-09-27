@@ -97,7 +97,11 @@ smoke_test() {  # $1: executable, $2: label, remaining: arguments for the reader
     if [[ $# -gt 0 ]]; then
         first=""
         for _ in $(seq 1 $((SMOKE_SECONDS * 20))); do
-            if grep -qa 'first page ready' "$log" 2>/dev/null; then
+            # The controller's own line, in the wording ADR-016 settled on: the thing
+            # that is ready is the first *window* of the column (the pagination era
+            # logged `first page ready`, and this grep was left behind by the rename -
+            # so the figure was silently never measured).
+            if grep -qa 'first window ready' "$log" 2>/dev/null; then
                 first="$(date +%s.%N)"
                 break
             fi
@@ -125,7 +129,7 @@ smoke_test() {  # $1: executable, $2: label, remaining: arguments for the reader
         grep -aiE "$ERROR_PATTERN" "$log" | head -10
         return 1
     fi
-    grep -aoE 'first page ready in [0-9]+ ms' "$log" | tail -1 || true
+    grep -aoE 'first window ready in [0-9]+ ms' "$log" | tail -1 || true
 }
 
 smoke_test "${dist}/ebook-reader-dir/ebook-reader" "文件夹版-打开指定书" "$book"

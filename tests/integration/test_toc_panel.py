@@ -170,11 +170,14 @@ def test_a_row_that_names_an_anchor_lands_on_it(
 ) -> None:
     """Two rows may share a document and still lead to different places (FR-014).
 
-    币安's contents points 幣安上線 (row 5) and 早年歲月 (row 6) at the same file, the
-    second at an anchor well inside it.  The anchor was dropped on both parsing paths,
-    so the second row landed on the top of the file - exactly where the first one had
-    just been - and the panel marked the first row as the reader's place even after
-    they had asked for the second.
+    币安's contents points 幣安上線 and 早年歲月 at the same file, the second at an
+    anchor well inside it.  The anchor was dropped on both parsing paths, so the
+    second row landed on the top of the file - exactly where the first one had just
+    been - and the panel marked the first row as the reader's place even after they
+    had asked for the second.
+
+    The pair is found by name rather than by index, because the list also carries the
+    rows the book leaves unnamed (FR-012) and those come first.
     """
     _, window, controller = shell
     assert controller.openBook(str(binan_path))
@@ -182,23 +185,68 @@ def test_a_row_that_names_an_anchor_lands_on_it(
 
     listing = item(window, "tocList")
     rows = _rows(listing)
-    assert len(rows) > 6
+    titles = [entry["title"] for entry in controller.tocItems]
+    at = titles.index("幣安上線，2017年7月14日12點")
+    assert titles[at + 1] == "早年歲月", "the anchored row sits right below its sibling"
+    assert len(rows) > at + 1, "the pair has to be on screen to be clicked"
 
-    click(window, centre(rows[5]))                      # the first row of the file
+    click(window, centre(rows[at]))                     # the first row of the file
     pump(RESIZE_DEBOUNCE_MS + 100)
     section = controller.sectionIndex
     assert controller.scrollOffset == 0.0               # a row with no anchor starts here
-    assert controller.currentTocRow == 5
+    assert controller.currentTocRow == at
 
     # Read again: the jump rebuilt the rows, and the old delegates went with it.
     rows = _rows(listing)
-    click(window, centre(rows[6]))                      # the anchored row, same file
+    click(window, centre(rows[at + 1]))                 # the anchored row, same file
     pump(RESIZE_DEBOUNCE_MS + 100)
 
     assert controller.sectionIndex == section            # same document ...
     assert controller.scrollOffset > 0.0                 # ... and inside it, not at its top
     assert controller._anchor_block() > 0
-    assert controller.currentTocRow == 6                 # and the panel says so
+    assert controller.currentTocRow == at + 1            # and the panel says so
+    assert warnings == []
+
+
+def test_the_panel_lists_the_chapters_of_an_omnibus_that_names_three_volumes(
+    shell, linqi_path: Path, warnings
+) -> None:
+    """135 sections, a three-row NCX: the map still shows every chapter (FR-012).
+
+    This is the book that made the gap visible: its contents names its three volumes,
+    `]` walks 135 sections, and the panel showed three rows - so the reader could move
+    through the book but could not see where they were going or jump anywhere.  The
+    sections the book does not name now name themselves, in reading order, which is
+    what makes the panel show the same list the keys walk through.
+    """
+    _, window, controller = shell
+    assert controller.openBook(str(linqi_path))
+    pump(RESIZE_DEBOUNCE_MS + 100)
+
+    titles = [entry["title"] for entry in controller.tocItems]
+    assert len(titles) >= 130, "135 sections, less the handful that name nothing"
+    assert "战胜华尔街Beating the Street（珍藏版）" in titles      # the book's own row
+    assert "第1章 业余投资者比专业投资者业绩更好" in titles          # a chapter's own name
+
+    # Every row leads somewhere different: the panel highlights by position, so two
+    # rows answering with the same place would make one of them unreachable.
+    targets = [entry["section"] for entry in controller.tocItems]
+    assert targets == sorted(targets), "the rows are in reading order"
+    assert len(set(targets)) == len(targets)
+
+    # A real click on a row the book never named lands in that chapter.
+    rows = _rows(item(window, "tocList"))
+    click(window, centre(rows[0]))
+    pump(RESIZE_DEBOUNCE_MS + 100)
+    assert controller.sectionIndex == targets[0]
+    assert controller.currentTocRow == 0
+
+    # And a chapter past the visible rows is reachable by its own row.
+    at = titles.index("后记 马里兰之旅的感悟")
+    controller.goToTocRow(at)
+    pump(RESIZE_DEBOUNCE_MS + 100)
+    assert controller.sectionIndex == targets[at] == 134
+    assert controller.currentTocRow == at
     assert warnings == []
 
 

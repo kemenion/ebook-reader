@@ -167,8 +167,15 @@ ApplicationWindow {
             // angle left those gestures scrolling by exactly nothing.  Which delta
             // counts, and how far it moves, is the controller's decision, so that the
             // wheel, the keys and the menu move by the same units (FR-063 / FR-073).
+            //
+            // `acceptedDevices` has to name the TouchPad, or the wheel is dead on
+            // Wayland: there the compositor's `wl_pointer.axis` events are attributed
+            // to the seat's pointer device, which Qt registers as a TouchPad, while a
+            // handler's default is Mouse alone - and the handler then declines every
+            // wheel event before `onWheel` is reached (defect 24).
             WheelHandler {
                 target: null
+                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
                 onWheel: function (event) {
                     if (!ctl) { return }
                     ctl.wheelScroll(event.angleDelta.y, event.pixelDelta.y)

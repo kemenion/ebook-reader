@@ -104,10 +104,14 @@ def test_a_row_can_be_both_scrolled_and_anchored(binan) -> None:
     币安's NCX points 推薦語 and 獻詞 at the same document; before the anchor was kept,
     both rows landed on the top of it, so the map said the second chapter began where
     the first one did.
+
+    The pair is searched for rather than assumed to be the first two rows: the panel
+    also carries the rows the book leaves unnamed (FR-012), and 币安's 免责声明 comes
+    before that pair.
     """
     rows = _flatten_toc(binan.toc, binan)
-    first, second = rows[0], rows[1]
-    assert first[1] == second[1], "the fixture assumes one file holding both chapters"
+    position = next(at for at in range(len(rows) - 1) if rows[at][1] == rows[at + 1][1])
+    first, second = rows[position], rows[position + 1]
     assert first[0].fragment == "" and second[0].fragment, "the second row is anchored"
 
     blocks = binan.blocks(second[1])
@@ -308,9 +312,12 @@ def test_a_nav_document_without_landmarks_has_none() -> None:
 
 
 def test_a_book_reads_its_landmarks_and_keeps_them_out_of_the_contents(build_epub) -> None:
+    # The cover's own first line is deliberately not what the landmark calls it, so a
+    # row labelled 封面 could only have come from the landmarks leaking (FR-009); the
+    # second row's empty fragment says the same about bodymatter's anchor.
     path = build_epub(
         {
-            "text/cover.xhtml": "<html><body><p>封面</p></body></html>",
+            "text/cover.xhtml": "<html><body><p>卷首</p></body></html>",
             "text/ch1.xhtml": "<html><body><h1>第一章</h1></body></html>",
         },
         resources={"nav.xhtml": NAV_WITH_LANDMARKS},
@@ -318,7 +325,10 @@ def test_a_book_reads_its_landmarks_and_keeps_them_out_of_the_contents(build_epu
     )
     book = EpubBook.open(path)
     assert [row.type for row in book.landmarks] == ["cover", "bodymatter"]
-    assert [entry.title for entry in book.toc] == ["第一章"]
+    assert [(entry.title, entry.fragment) for entry in book.toc] == [
+        ("卷首", ""),
+        ("第一章", ""),
+    ]
 
 
 def test_a_book_that_says_nothing_about_its_parts_has_no_landmarks(binan) -> None:
@@ -336,4 +346,188 @@ def test_a_link_with_no_path_is_answered_by_the_document_it_was_written_in(binan
 def test_a_document_with_no_navigation_at_all_is_an_empty_tree_not_an_error() -> None:
     assert parse_nav(b"<html><body><p>\xe6\xad\xa3\xe6\x96\x87</p></body></html>", "") == ()
     assert parse_ncx(b"<ncx><navLabel><text>x</text></navLabel></ncx>", "") == ()
+
+
+# ------------------------------------- the sections the contents does not name (FR-012)
+
+#: A book whose NCX names one section out of four - the shape the omnibus has, small
+#: enough to reason about.  Section 0 says nothing, 1 names itself, 2 is a photo
+#: caption and 3 is the one the book itself names.
+SPARSE_NCX = """<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <navMap>
+    <navPoint id="n3"><navLabel><text>第三章 收尾</text></navLabel>
+      <content src="text/ch3.xhtml"/></navPoint>
+  </navMap>
+</ncx>
+"""
+
+
+def _ncx_book(build_epub, documents, ncx: str = SPARSE_NCX, **kwargs):
+    """A book whose only navigation is the NCX written here."""
+    return build_epub(
+        documents,
+        resources={"toc.ncx": ncx},
+        manifest={"toc.ncx": ("application/x-dtbncx+xml", "ncx")},
+        **kwargs,
+    )
+
+
+def _contents(path) -> list[tuple[str, int]]:
+    """The contents as the panel reads it: each row's title and the section it leads to."""
+    book = EpubBook.open(path)
+    return [(entry.title, section) for entry, section in _flatten_toc(book.toc, book)]
+
+
+def test_a_section_the_contents_does_not_name_names_itself(build_epub) -> None:
+    """The row a book leaves out is filled from the section's own first line (FR-012).
+
+    A section that says nothing at all (a cover that is one image), and one whose
+    first line is a caption rather than a name, stay out of the panel rather than
+    turning up as rows that say nothing about where they lead.
+    """
+    path = _ncx_book(
+        build_epub,
+        {
+            "text/cover.xhtml": "<html><body><p><img src='cover.png'/></p></body></html>",
+            "text/ch1.xhtml": "<html><body><p>第一章 起步</p><p>正文。</p></body></html>",
+            "text/ch2.xhtml": "<html><body><p>1989年，温哥华的车库。</p></body></html>",
+            "text/ch3.xhtml": "<html><body><h1>第三章 收尾</h1></body></html>",
+        },
+    )
+    assert _contents(path) == [("第一章 起步", 1), ("第三章 收尾", 3)]
+
+
+@pytest.mark.parametrize(
+    "first_line",
+    [
+        "2017年10月，东京工作时期每日通勤的自行车。",          # a photo caption
+        "出版者：",                                          # a masthead
+        "最早阅读彼得·林奇的著作还是十几年前的事，当时我对这位美国富达公司麦哲伦基金经理印象最深的一点，就是他强调日常生活经验有助于股票投资。",
+    ],
+)
+def test_a_first_line_that_reads_as_prose_is_not_a_name(build_epub, first_line: str) -> None:
+    """A book with no contents and no names gets no rows, rather than rows of prose.
+
+    A row has one job - telling the reader where it leads - and a sentence of the
+    third chapter's first paragraph does not do that job.
+    """
+    path = build_epub({"text/ch1.xhtml": f"<html><body><p>{first_line}</p></body></html>"})
+    assert EpubBook.open(path).toc == ()
+
+
+def test_a_heading_is_a_name_however_long_it_says(build_epub) -> None:
+    """A marked heading is the publisher's name, so length and punctuation do not count."""
+    title = "第十二章 关于在一个所有人都在谈论股票的年代里如何保持冷静并继续长期投资的若干思考"
+    path = build_epub(
+        {"text/ch1.xhtml": f"<html><body><h3>{title}</h3><p>正文。</p></body></html>"}
+    )
+    book = EpubBook.open(path)
+    assert [entry.title for entry in book.toc] == [title]
+
+
+def test_a_document_outside_the_reading_order_gets_no_row(build_epub) -> None:
+    """``linear="no"`` is not part of the order the reader walks (FR-016)."""
+    path = build_epub(
+        {
+            "text/ch1.xhtml": "<html><body><p>第一章 起</p><p>正文。</p></body></html>",
+            "text/ad.xhtml": "<html><body><p>广告页 五折促销</p><p>正文。</p></body></html>",
+            "text/ch2.xhtml": "<html><body><p>第二章 止</p><p>正文。</p></body></html>",
+        },
+        linear_no=["text/ad.xhtml"],
+    )
+    assert [entry.title for entry in EpubBook.open(path).toc] == ["第一章 起", "第二章 止"]
+
+
+NESTED_NCX = """<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <navMap>
+    <navPoint id="p1"><navLabel><text>第一部分</text></navLabel>
+      <content src="text/ch1.xhtml"/>
+      <navPoint id="c2"><navLabel><text>第二章</text></navLabel>
+        <content src="text/ch2.xhtml"/></navPoint>
+    </navPoint>
+    <navPoint id="p2"><navLabel><text>第二部分</text></navLabel>
+      <content src="text/ch5.xhtml"/></navPoint>
+  </navMap>
+</ncx>
+"""
+
+
+def test_the_added_rows_keep_their_place_and_the_books_nesting(build_epub) -> None:
+    """Filling the gaps adds rows; it does not rearrange what the book wrote.
+
+    The unnamed sections land inside the part whose chapters surround them, at that
+    part's level, and in reading order - the order the panel's highlight and 「下一章」
+    both depend on.
+    """
+    path = _ncx_book(
+        build_epub,
+        {
+            f"text/ch{number}.xhtml": (
+                f"<html><body><p>第{number}节 标题</p><p>正文。</p></body></html>"
+            )
+            for number in range(1, 7)
+        },
+        ncx=NESTED_NCX,
+    )
+    book = EpubBook.open(path)
+    assert book.toc[0].title == "第一部分"
+    assert [child.title for child in book.toc[0].children] == [
+        "第二章",
+        "第3节 标题",
+        "第4节 标题",
+    ], "the part keeps its chapter and takes the sections that belong to it"
+    assert [
+        (entry.title, section, entry.level) for entry, section in _flatten_toc(book.toc, book)
+    ] == [
+        ("第一部分", 0, 0),
+        ("第二章", 1, 1),
+        ("第3节 标题", 2, 1),
+        ("第4节 标题", 3, 1),
+        ("第二部分", 4, 0),
+        ("第6节 标题", 5, 0),
+    ]
+
+
+def test_a_name_the_reading_window_cut_in_half_is_read_again_in_full(build_epub) -> None:
+    """A document is read whole when its head ended on the very block that names it.
+
+    The name is looked for in the head of the file - that is what keeps naming 135
+    sections cheap (see ``_LABEL_SNIFF_BYTES``).  The head that cannot answer is the
+    one that ran out in the middle of the line, and the answer then has to come from
+    the whole document rather than from the half of it that fitted.
+    """
+    from ebook_reader.domain.epub.book import _LABEL_SNIFF_BYTES
+
+    title = "第九章 名字正好落在读窗口中间的那一章"
+    opening, closing = "<html><head><!--", "--></head><body><p>"
+    room = _LABEL_SNIFF_BYTES - len(opening.encode()) - len(closing.encode())
+    padding = "x" * (room - len(title.encode()) // 2)
+    document = f"{opening}{padding}{closing}{title}</p><p>正文。</p></body></html>"
+    cut = document.encode()[:_LABEL_SNIFF_BYTES]
+    assert title.encode()[:3] in cut and title.encode() not in cut, "the window misses the name"
+
+    path = build_epub({"text/ch1.xhtml": document})
+    assert [entry.title for entry in EpubBook.open(path).toc] == [title]
+
+
+def test_the_omnibus_shows_every_chapter_the_keys_walk_through(linqi) -> None:
+    """135 sections, three of them named by the NCX: the rest name themselves (FR-012).
+
+    This is the book the gap was found on.  `]` walked 135 sections while the panel
+    offered three rows, so the reader could move through the book but could not see
+    where they were going - and the sections that were missing are exactly the ones
+    the book never mentions.
+    """
+    rows = _flatten_toc(linqi.toc, linqi)
+    targets = [section for _, section in rows]
+    assert len(rows) >= 130
+    assert targets == sorted(targets), "the panel reads the rows in reading order"
+    assert 0 not in targets, "the title page says nothing, so it gets no row"
+
+    contents = {entry.title: section for entry, section in rows}
+    assert contents["战胜华尔街Beating the Street（珍藏版）"] == 3       # the book's own row
+    assert contents["第1章 业余投资者比专业投资者业绩更好"] == 12       # a chapter's own name
+    assert contents["后记 马里兰之旅的感悟"] == linqi.section_count - 1
 
