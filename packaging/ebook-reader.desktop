@@ -1,0 +1,19 @@
+[Desktop Entry]
+Type=Application
+Version=1.2
+Name=Ebook Reader
+Name[zh_CN]=电子书阅读器
+Comment=Read EPUB books
+Comment[zh_CN]=阅读 EPUB 电子书
+# The folder build lives in dist/ebook-reader-dir; the single-file build can be
+# copied anywhere.  Neither is on PATH until installed, so the launcher that
+# ships alongside the binary substitutes the real path for this placeholder.
+Exec=ebook-reader %f
+TryExec=ebook-reader
+Icon=ebook-reader
+Terminal=false
+Categories=Office;Viewer;Literature;
+MimeType=application/epub+zip;
+Keywords=ebook;epub;reader;电子书;阅读;
+StartupNotify=true
+StartupWMClass=ebook-reader

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ebook-reader"
+version = "0.1.0"
+description = "Self-contained, performance-focused EPUB reader with careful CJK typesetting"
+readme = "README.md"
+requires-python = ">=3.10,<3.15"
+license = { text = "MIT" }
+
+# ADR-009: exactly one runtime dependency. Never add PySide6-Addons (QtWebEngine).
+dependencies = ["PySide6-Essentials>=6.6"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+# P7 packaging. PyInstaller 6.x is the only freezer here that supports the
+# Python this project runs on; `packaging/build.sh` explains the rest.
+packaging = ["pyinstaller>=6.10"]
+
+[project.scripts]
+ebook-reader = "ebook_reader.app.main:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ebook_reader = ["qml/*.qml", "qml/**/*.qml", "qml/shaders/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["error::DeprecationWarning:ebook_reader.*"]

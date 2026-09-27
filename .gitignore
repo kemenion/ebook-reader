@@ -1,0 +1,20 @@
+# Virtual environment (PySide6-Essentials is the only runtime dependency)
+.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Packaging output. The spec file itself lives in packaging/ and is source.
+*.AppImage
+
+# Reference books: test data, not part of the source tree
+ebooks/
