@@ -122,7 +122,119 @@ def test_bad_input_raises_a_readable_error(tmp_path) -> None:
         EpubBook.open(missing)
 
 
+GBK_PACKAGE = """<?xml version="1.0" encoding="gbk"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="bookid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="bookid">urn:uuid:sample</dc:identifier>
+    <dc:title>書名</dc:title>
+    <dc:creator>作者</dc:creator>
+    <dc:language>zh</dc:language>
+  </metadata>
+  <manifest>
+    <item id="i0" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="i0"/></spine>
+</package>
+"""
+
+
+def test_a_package_written_in_a_legacy_encoding_is_still_read(build_epub) -> None:
+    """A declared ``gbk`` makes expat raise ``ValueError``, which is not a ``ParseError``.
+
+    The title and the author are exactly the text that has to be decoded, so refusing the
+    document would mean a traceback out of ``open()`` for a book that names its own
+    encoding correctly.
+    """
+    path = build_epub(
+        {"text/ch1.xhtml": "<html><body><p>正文</p></body></html>"},
+        package_xml=GBK_PACKAGE.encode("gbk"),
+    )
+    book = EpubBook.open(path)
+    assert book.meta.title == "書名"
+    assert book.meta.authors == ("作者",)
+    assert book.meta.language == "zh"
+
+
 def test_section_lookup_by_href(kangpo) -> None:
     for item in kangpo.spine[:5]:
         assert kangpo.section_index_for_href(item.href) == item.index
     assert kangpo.section_index_for_href("EPUB/xhtml/Nonexistent") == -1
+
+
+# --------------------------------------------- the package's own pointers (FR-011)
+
+
+SPINE_NAMES_ITS_NCX = """<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="bookid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="bookid">urn:uuid:sample</dc:identifier>
+    <dc:title>样本</dc:title>
+    <dc:language>zh</dc:language>
+  </metadata>
+  <manifest>
+    <item id="i0" href="text/ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="map" href="toc.ncx" media-type="text/plain"/>
+  </manifest>
+  <spine toc="map">
+    <itemref idref="i0"/>
+  </spine>
+</package>
+"""
+
+WRONG_MEDIA_TYPE_NCX = """<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
+  <navMap>
+    <navPoint id="n1"><navLabel><text>第一章 引言</text></navLabel>
+      <content src="text/ch1.xhtml"/></navPoint>
+  </navMap>
+</ncx>
+"""
+
+
+def test_the_spine_names_the_ncx_when_the_manifest_does_not(build_epub) -> None:
+    """EPUB 2 points at its NCX twice; a wrong media type only breaks one of the two.
+
+    The row title is deliberately *not* the chapter's own heading, so that a reader
+    falling back to the heading outline cannot pass this test by accident.
+    """
+    path = build_epub(
+        {"text/ch1.xhtml": "<html><body><h1>第一章</h1></body></html>"},
+        resources={"toc.ncx": WRONG_MEDIA_TYPE_NCX},
+        manifest={"toc.ncx": ("text/plain", "")},
+        package_xml=SPINE_NAMES_ITS_NCX,
+    )
+    book = EpubBook.open(path)
+    assert [entry.title for entry in book.toc] == ["第一章 引言"]
+
+
+def test_a_document_marked_non_linear_is_not_paged_into(build_epub) -> None:
+    """``linear="no"`` is in the spine but not in the text: a cover, an advertisement."""
+    path = build_epub(
+        {
+            "text/cover.xhtml": "<html><body><p>封面</p></body></html>",
+            "text/ch1.xhtml": "<html><body><h1>第一章</h1></body></html>",
+            "text/ad.xhtml": "<html><body><p>广告</p></body></html>",
+            "text/ch2.xhtml": "<html><body><h1>第二章</h1></body></html>",
+        },
+        linear_no=["text/cover.xhtml", "text/ad.xhtml"],
+    )
+    book = EpubBook.open(path)
+    assert book.section_count == 4  # the documents are still readable, and still indexed
+    assert [item.linear for item in book.spine] == [False, True, False, True]
+    assert book.next_section(0) == 1
+    assert book.next_section(1) == 3
+    assert book.next_section(3) == -1
+    assert book.previous_section(3) == 1  # backwards across the advertisement
+    assert book.previous_section(2) == 1
+    assert book.previous_section(1) == -1  # the cover before it is not part of the text
+    assert book.previous_section(0) == -1
+
+
+def test_paging_the_reference_books_never_skips_a_section(kangpo, binan) -> None:
+    """A linear spine is what the reference books have; the walk must be a plain walk."""
+    for book in (kangpo, binan):
+        assert all(item.linear for item in book.spine)
+        for index in range(book.section_count - 1):
+            assert book.next_section(index) == index + 1
+        assert book.previous_section(0) == -1
+

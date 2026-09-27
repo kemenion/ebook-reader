@@ -12,14 +12,19 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 from ..errors import BookError, MissingResourceError, NotAnEpubError, PackageError
-from ..models import Block, BookMeta, ManifestItem, SpineItem, TocEntry
+from ..models import Block, BookMeta, Landmark, ManifestItem, SpineItem, TocEntry
 from . import container, images, toc
 from .opf import Package, parse_package
-from .paths import join_href, normalize
+from .paths import join_href, normalize, split_fragment
 
 __all__ = ["EpubBook"]
 
 _IMAGE_MEDIA_PREFIX = "image/"
+
+
+def _base_dir_of(href: str) -> str:
+    """The directory an href lives in, which relative hrefs resolve against."""
+    return href.rsplit("/", 1)[0] if "/" in href else ""
 
 #: How much of an image entry is decompressed to find its frame header.  Large
 #: enough for JFIF/Exif application segments, small enough to stay cheap.
@@ -34,6 +39,7 @@ class EpubBook:
         self._zip: zipfile.ZipFile | None = None
         self._package: Package | None = None
         self._toc: tuple[TocEntry, ...] | None = None
+        self._landmarks: tuple[Landmark, ...] | None = None
         self._name_lookup: dict[str, str] | None = None
         self._block_cache: dict[int, tuple[Block, ...]] = {}
         self._probe_cache: dict[str, tuple[int, int] | None] = {}
@@ -144,8 +150,7 @@ class EpubBook:
 
     def section_base_dir(self, index: int) -> str:
         """Directory that relative hrefs inside a section resolve against."""
-        href = self.spine[index].href
-        return href.rsplit("/", 1)[0] if "/" in href else ""
+        return _base_dir_of(self.spine[index].href)
 
     def resolve_in_section(self, index: int, href: str) -> str:
         return join_href(self.section_base_dir(index), href)
@@ -231,11 +236,27 @@ class EpubBook:
         for href, parser in ((package.nav_href, toc.parse_nav), (package.ncx_href, toc.parse_ncx)):
             if not href or not self.has_resource(href):
                 continue
-            base_dir = href.rsplit("/", 1)[0] if "/" in href else ""
-            entries = parser(self.resource(href), base_dir)
+            entries = parser(self.resource(href), _base_dir_of(href))
             if entries:
                 return entries
         return self._toc_from_headings()
+
+    @property
+    def landmarks(self) -> tuple[Landmark, ...]:
+        """Where the book says its parts begin; empty when it does not say (FR-009).
+
+        Only EPUB 3 books with a ``landmarks`` navigation have them, which is none of
+        the three reference books.
+        """
+        if self._landmarks is None:
+            self._landmarks = self._read_landmarks()
+        return self._landmarks
+
+    def _read_landmarks(self) -> tuple[Landmark, ...]:
+        nav_href = self.package.nav_href
+        if not nav_href or not self.has_resource(nav_href):
+            return ()
+        return toc.parse_landmarks(self.resource(nav_href), _base_dir_of(nav_href))
 
     def _toc_from_headings(self, max_level: int = 2) -> tuple[TocEntry, ...]:
         """Fallback navigation derived from the first heading of each section."""
@@ -249,14 +270,50 @@ class EpubBook:
                     break
         return tuple(entries)
 
-    def section_index_for_href(self, href: str) -> int:
-        """Find the spine index that owns *href* (fragment ignored), or ``-1``."""
-        target = normalize(href)
+    def section_index_for_href(self, href: str, *, current: int = -1) -> int:
+        """Find the spine index that owns *href*, ignoring any fragment, or ``-1``.
+
+        The fragment is dropped rather than matched because it names a place *inside*
+        the document, and this method answers which document that is; whether the row
+        then lands at the top of it or at an anchor in it is a second question, asked of
+        the laid-out section once it exists (FR-014).
+
+        *current* answers the one href that names no document: ``#note3`` is a place in
+        the document the link was written in, and a reader that knows which section it
+        is showing can resolve it.  The default is ``-1`` because a caller without that
+        context - the table of contents, whose rows live in the navigation document -
+        has no place to send such a link, and guessing the first section would be worse
+        than not following it.
+        """
+        path, fragment = split_fragment(href)
+        target = normalize(path)
         if not target:
-            return -1
+            return current if fragment and 0 <= current < self.section_count else -1
         for item in self.spine:
             if item.href == target:
                 return item.index
+        return -1
+
+    def next_section(self, index: int) -> int:
+        """Next section of the reading order after *index*, or ``-1``.
+
+        A ``linear="no"`` document sits in the spine but not in the text - a cover, an
+        advertisement, a fold-out map - and paging into one is paging into something
+        the publisher said was not the book.  None of the three reference books marks a
+        document this way, so this rule is exercised by a book written in the tests.
+        """
+        return self._step_section(index, 1)
+
+    def previous_section(self, index: int) -> int:
+        """Previous section of the reading order before *index*, or ``-1``."""
+        return self._step_section(index, -1)
+
+    def _step_section(self, index: int, delta: int) -> int:
+        target = index + delta
+        while 0 <= target < self.section_count:
+            if self.spine[target].linear:
+                return target
+            target += delta
         return -1
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid

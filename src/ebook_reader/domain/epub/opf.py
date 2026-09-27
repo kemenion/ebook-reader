@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from xml.etree import ElementTree as ET
 
 from ..errors import PackageError
@@ -12,6 +13,7 @@ __all__ = ["Package", "parse_package"]
 
 _NCX_MEDIA_TYPE = "application/x-dtbncx+xml"
 _NAV_PROPERTY = "nav"
+_XML_DECLARATION_RE = re.compile(r"^\s*<\?xml[^>]*\?>")
 
 
 class Package:
@@ -100,9 +102,30 @@ def _build_spine(
                 idref=idref,
                 href=join_href(base_dir, item.href),
                 media_type=item.media_type,
+                linear=(element.get("linear") or "yes").strip().lower() != "no",
             )
         )
     return tuple(spine)
+
+
+def _spine_toc_href(
+    root: ET.Element,
+    manifest: dict[str, ManifestItem],
+    base_dir: str,
+) -> str | None:
+    """The NCX the spine points at through ``<spine toc="…">`` (FR-011).
+
+    An EPUB 2 package names its navigation twice - the manifest declares the media
+    type, and the spine names the document - and the second one survives the mistakes
+    the first one does not: a manifest item for the NCX with a wrong or missing
+    media type is still named correctly here.
+    """
+    spine = next((element for element in _find_all(root, "spine")), None)
+    if spine is None:
+        return None
+    item = manifest.get(spine.get("toc") or "")
+    return join_href(base_dir, item.href) if item is not None else None
+
 
 
 def _build_meta(
@@ -153,12 +176,34 @@ def _find_cover_href(
     return None
 
 
-def parse_package(raw: bytes, opf_path: str) -> Package:
-    """Parse raw OPF bytes that live at *opf_path* inside the archive."""
+def _read_package_xml(raw: bytes, opf_path: str) -> ET.Element:
+    """Read the package document, including books that declare a legacy encoding.
+
+    expat implements UTF-8 and UTF-16 and refuses every other encoding *by name* - a
+    ``gbk`` declaration raises ``ValueError``, not ``ParseError``, and it used to escape
+    as a traceback out of ``EpubBook.open()``.  Older Chinese books write their package
+    document that way as a matter of course, and the title and the author are exactly
+    the text that needs decoding, so the document is decoded first and the declaration
+    dropped (expat will not accept an encoding declaration on text it did not decode).
+    """
     try:
-        root = ET.fromstring(raw)
+        return ET.fromstring(raw)
+    except ValueError:
+        pass
     except ET.ParseError as exc:
         raise PackageError(f"{opf_path} is not valid XML: {exc}") from exc
+
+    from ..html.sanitizer import decode_text
+
+    try:
+        return ET.fromstring(_XML_DECLARATION_RE.sub("", decode_text(raw), count=1))
+    except ET.ParseError as exc:
+        raise PackageError(f"{opf_path} is not valid XML: {exc}") from exc
+
+
+def parse_package(raw: bytes, opf_path: str) -> Package:
+    """Parse raw OPF bytes that live at *opf_path* inside the archive."""
+    root = _read_package_xml(raw, opf_path)
 
     base_dir = opf_path.rsplit("/", 1)[0] if "/" in opf_path else ""
     manifest = _build_manifest(root)
@@ -174,7 +219,7 @@ def parse_package(raw: bytes, opf_path: str) -> Package:
     ncx_href = next(
         (join_href(base_dir, item.href) for item in manifest.values() if item.media_type == _NCX_MEDIA_TYPE),
         None,
-    )
+    ) or _spine_toc_href(root, manifest, base_dir)
 
     return Package(
         opf_path=normalize(opf_path),

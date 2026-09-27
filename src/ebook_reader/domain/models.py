@@ -17,6 +17,7 @@ __all__ = [
     "BlockKind",
     "BookMeta",
     "ImageRef",
+    "Landmark",
     "ManifestItem",
     "Span",
     "SpineItem",
@@ -142,12 +143,33 @@ class SpineItem:
     ``media_type`` is the authoritative way to tell a renderable document from
     anything else; the file name must not be inspected, because 25 of 28
     documents in the reference book carry no extension at all (I-1 / FR-004).
+
+    ``linear`` is the publisher's answer to "does this document belong to the book
+    proper"; a reading order that walks past a ``linear="no"`` document is the one
+    the publisher asked for.  None of the three reference books uses it, so it is
+    only exercised by a book written in the tests.
     """
 
     index: int
     idref: str
     href: str
     media_type: str
+    linear: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class Landmark:
+    """One row of a ``landmarks`` navigation document (FR-009).
+
+    ``type`` is the EPUB structural semantic - ``bodymatter``, ``toc``,
+    ``cover`` - and is the part worth keeping: it says which document the text
+    actually starts in, which a table of contents full of front matter does not.
+    """
+
+    type: str
+    title: str
+    href: str = ""
+    fragment: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,4 +179,12 @@ class TocEntry:
     title: str
     href: str
     level: int = 0
+    #: The in-document anchor this row points at, without the ``#``; empty when the row
+    #: points at the top of its document.  It sits beside ``href`` rather than inside it
+    #: because ``href`` answers "which document" - the question that has to be resolved
+    #: against the spine - while this answers "where in it" (FR-014).  Publishers use it
+    #: heavily: in one reference book 143 of the contents' links name an anchor instead
+    #: of a file, and a reader that dropped the fragment sent every one of them to the
+    #: top of the document.
+    fragment: str = ""
     children: tuple["TocEntry", ...] = field(default_factory=tuple)

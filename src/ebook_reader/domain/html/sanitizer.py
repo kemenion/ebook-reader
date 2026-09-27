@@ -28,7 +28,7 @@ from xml.etree import ElementTree as ET
 from ..models import Block, BlockAlign, BlockKind, ImageRef, Span
 from .kinsoku import protect_spans
 
-__all__ = ["sanitize", "SizeProbe"]
+__all__ = ["decode_text", "sanitize", "SizeProbe"]
 
 SizeProbe = Callable[[str], "tuple[int, int] | None"]
 
@@ -214,9 +214,10 @@ def sanitize(
     """Convert one XHTML document into our block model.
 
     *base_dir* is the archive directory of the document, used to resolve relative
-    ``src`` attributes.  *probe* reports intrinsic image sizes (see
-    :mod:`ebook_reader.domain.epub.images`); when omitted, image blocks carry
-    width and height ``0``.  *protect* enables CJK line-break protection.
+    ``src`` attributes; a document that declares ``<base href>`` rebases itself
+    against it first, exactly as a browser would.  *probe* reports intrinsic image
+    sizes (see :mod:`ebook_reader.domain.epub.images`); when omitted, image blocks
+    carry width and height ``0``.  *protect* enables CJK line-break protection.
 
     Malformed XML falls back to a tolerant HTML parse so that a single bad
     document cannot make a whole book unreadable (NFR-020).
@@ -228,18 +229,59 @@ def sanitize(
         text = ""
         try:
             parsed = ET.fromstring(raw)
-        except ET.ParseError:
+        except (ET.ParseError, ValueError):
+            # ``ValueError`` is a declared encoding expat does not implement (``gbk``,
+            # ``big5``, …): the document is fine and has to be decoded first, which is
+            # what the tolerant path below does.  Letting it through would be a
+            # traceback for a chapter a browser shows in full.
             parsed = None
         if parsed is None:
             text = _decode(raw)
 
     if parsed is not None:
-        return _TreeWalker(base_dir, probe, protect).run(parsed)
+        return _TreeWalker(_declared_base(parsed, base_dir), probe, protect).run(parsed)
 
-    tolerant = _TolerantParser(base_dir, probe, protect)
+    tolerant = _TolerantParser(_declared_base_in_text(text, base_dir), probe, protect)
     tolerant.feed(text)
     tolerant.close()
     return tolerant.finish()
+
+
+_BASE_HREF_RE = re.compile(r"""<base\b[^>]*?\bhref\s*=\s*["']([^"']*)["']""", re.IGNORECASE)
+
+
+def _declared_base(root: ET.Element, base_dir: str) -> str:
+    """The directory *root* declares for its own relative hrefs (FR-006).
+
+    ``<base href>`` is rare, legal, and ignored by everything that reads a document as
+    a string: a book that uses it puts its images and stylesheets somewhere other than
+    beside the chapter, and a reader that does not look at the tag resolves every one of
+    them to the wrong place.  A base naming a file rather than a directory
+    (``../text/ch1.xhtml``) rebases against that file's directory, which is what a
+    browser does with it.
+    """
+    for element in root.iter():
+        if _local_name(element.tag) == "base":
+            return _rebase(base_dir, element.get("href") or "")
+    return base_dir
+
+
+def _declared_base_in_text(text: str, base_dir: str) -> str:
+    """The same rule for a document that had to be read as HTML."""
+    match = _BASE_HREF_RE.search(text)
+    return _rebase(base_dir, match.group(1)) if match else base_dir
+
+
+def _rebase(base_dir: str, href: str) -> str:
+    """Rebase *base_dir* on one ``<base href>`` value."""
+    if not href:
+        return base_dir
+    from ..epub.paths import join_href
+
+    resolved = join_href(base_dir, href)
+    if href.endswith("/") or not resolved:
+        return resolved
+    return resolved.rsplit("/", 1)[0] if "/" in resolved else ""
 
 
 
@@ -291,19 +333,46 @@ class _TreeWalker:
         self.current: _BlockBuilder | None = None
         self._aligns: list[BlockAlign] = [BlockAlign.INHERIT]
         self._lists: list[bool] = []
+        #: Anchors seen on elements that produced no block of their own - an ``id`` on a
+        #: ``<div>`` whose whole content is other blocks, on an empty ``<p>`` used as a
+        #: marker, on an empty ``<a>``.  They still name a place in this document, and
+        #: that place is the next block, so they are carried over to it (FR-014).
+        self._orphans: list[str] = []
 
     # ------------------------------------------------------------ block output
 
     def run(self, root: ET.Element) -> tuple[Block, ...]:
         self._process(root, PLAIN)
         self._finish()
+        self._attach_trailing_anchors()
         return tuple(self.blocks)
 
     def _current_align(self) -> BlockAlign:
         return self._aligns[-1]
 
+    def _take_orphans(self) -> tuple[str, ...]:
+        """Anchors left over by an element that produced nothing, for the next block."""
+        orphans = tuple(self._orphans)
+        self._orphans.clear()
+        return orphans
+
+    def _attach_trailing_anchors(self) -> None:
+        """Give anchors that never met a following block to the last block there is.
+
+        A marker at the very end of a document - ``<p id="filepos9999"/>`` - points at
+        the end of what comes before it, and there is nothing after it to inherit it.
+        """
+        if not self._orphans or not self.blocks:
+            return
+        last = self.blocks[-1]
+        self.blocks[-1] = replace(last, anchor_ids=tuple(self._orphans) + last.anchor_ids)
+        self._orphans.clear()
+
     def _start(self, kind: BlockKind, **kwargs: object) -> _BlockBuilder:
         self._finish()
+        orphans = self._take_orphans()
+        if orphans:
+            kwargs["anchor_ids"] = orphans + tuple(kwargs.get("anchor_ids") or ())
         builder = _BlockBuilder(kind, **kwargs)  # type: ignore[arg-type]
         if builder.align is BlockAlign.INHERIT:
             builder.align = self._current_align()
@@ -313,16 +382,26 @@ class _TreeWalker:
     def _builder(self) -> _BlockBuilder:
         """Builder for inline content, created on demand as a paragraph."""
         if self.current is None:
-            self.current = _BlockBuilder(BlockKind.PARAGRAPH, align=self._current_align())
+            self.current = _BlockBuilder(
+                BlockKind.PARAGRAPH,
+                align=self._current_align(),
+                anchor_ids=self._take_orphans(),
+            )
         return self.current
 
     def _finish(self) -> None:
         if self.current is None:
             return
-        block = self.current.build(protect=self.protect)
+        builder = self.current
+        block = builder.build(protect=self.protect)
         self.current = None
-        if block is not None:
-            self.blocks.append(block)
+        if block is None:
+            # Nothing to attach the anchors to *here*; the next block is where this place
+            # is.  Dropping them instead is what made every link to them land at the top
+            # of the file, beside every other link to the same file.
+            self._orphans.extend(builder.anchor_ids)
+            return
+        self.blocks.append(block)
 
     # --------------------------------------------------------------- traversal
 
@@ -352,6 +431,7 @@ class _TreeWalker:
                     alt=element.get("alt") or "",
                 ),
                 align=self._current_align(),
+                anchor_ids=self._take_orphans() + _anchor_ids(element),
             )
         )
 
@@ -452,6 +532,17 @@ def _anchor_ids(element: ET.Element) -> tuple[str, ...]:
     return (anchor,) if anchor else ()
 
 
+def _anchor_from(attributes: dict[str, str]) -> tuple[str, ...]:
+    """The anchor id of a tag the HTML parser handed over as attributes.
+
+    The tolerant path never read ids at all, so a document it had to parse for being
+    malformed lost every one of its anchors and, with them, every contents row that
+    points inside it (FR-008 / FR-014).
+    """
+    anchor = attributes.get("id") or ""
+    return (anchor,) if anchor else ()
+
+
 def _inline_from(element: ET.Element, parent: _Inline) -> _Inline:
     """Derive the inline style contributed by *element*.
 
@@ -507,6 +598,12 @@ def _decode(raw: bytes) -> str:
         return raw.decode("utf-8", "replace")
 
 
+#: Public alias: a document that is not well-formed XML has to be decoded before the
+#: HTML parser can look at it, and the navigation parsers need the same rule the
+#: sanitiser uses rather than a second one that could disagree with it.
+decode_text = _decode
+
+
 class _TolerantParser(HTMLParser):
     """Fallback for documents that are not well-formed XML (FR-008 / NFR-020).
 
@@ -527,24 +624,47 @@ class _TolerantParser(HTMLParser):
         self._aligns: list[BlockAlign] = [BlockAlign.INHERIT]
         self._lists: list[bool] = []
         self._skip = 0
+        self._orphans: list[str] = []          # see _TreeWalker._orphans
 
     # The block plumbing deliberately mirrors _TreeWalker: same output model.
+
+    def _take_orphans(self) -> tuple[str, ...]:
+        orphans = tuple(self._orphans)
+        self._orphans.clear()
+        return orphans
+
+    def _attach_trailing_anchors(self) -> None:
+        if not self._orphans or not self.blocks:
+            return
+        last = self.blocks[-1]
+        self.blocks[-1] = replace(last, anchor_ids=tuple(self._orphans) + last.anchor_ids)
+        self._orphans.clear()
 
     def _finish(self) -> None:
         if self.current is None:
             return
-        block = self.current.build(protect=self.protect)
+        builder = self.current
+        block = builder.build(protect=self.protect)
         self.current = None
-        if block is not None:
-            self.blocks.append(block)
+        if block is None:
+            self._orphans.extend(builder.anchor_ids)
+            return
+        self.blocks.append(block)
 
     def _builder(self) -> _BlockBuilder:
         if self.current is None:
-            self.current = _BlockBuilder(BlockKind.PARAGRAPH, align=self._aligns[-1])
+            self.current = _BlockBuilder(
+                BlockKind.PARAGRAPH,
+                align=self._aligns[-1],
+                anchor_ids=self._take_orphans(),
+            )
         return self.current
 
     def _start(self, kind: BlockKind, **kwargs: object) -> None:
         self._finish()
+        orphans = self._take_orphans()
+        if orphans:
+            kwargs["anchor_ids"] = orphans + tuple(kwargs.get("anchor_ids") or ())
         builder = _BlockBuilder(kind, **kwargs)  # type: ignore[arg-type]
         if builder.align is BlockAlign.INHERIT:
             builder.align = self._aligns[-1]
@@ -555,18 +675,25 @@ class _TolerantParser(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.lower()
         if tag in _SKIP_TAGS:
-            self._skip += 1
+            # A void element - ``<base>``, ``<link>``, ``<meta>`` - has no end tag to
+            # count down, and a document that has to be read as HTML writes them without
+            # the slash.  Counting one anyway would leave the counter positive at
+            # ``</head>`` and swallow the whole body: the fallback would return nothing
+            # for a chapter that a browser shows in full.
+            if tag not in _VOID_TAGS:
+                self._skip += 1
             return
         if self._skip:
             return
         attributes = {name: (value or "") for name, value in attrs}
         align = _align_from_declarations(attributes.get("style", ""), attributes.get("align", ""))
+        anchors = _anchor_from(attributes)
 
         if tag in ("img", "image"):
             self._emit_image(attributes)
             return
         if tag == "hr":
-            self._start(BlockKind.RULE)
+            self._start(BlockKind.RULE, anchor_ids=anchors)
             self._finish()
             return
         if tag == "br":
@@ -579,15 +706,20 @@ class _TolerantParser(HTMLParser):
             return
         if tag in _HEADING_TAGS:
             self._aligns.append(align)
-            self._start(BlockKind.HEADING, level=_HEADING_TAGS[tag], align=align)
+            self._start(
+                BlockKind.HEADING,
+                level=_HEADING_TAGS[tag],
+                align=align,
+                anchor_ids=anchors,
+            )
             return
         if tag in _QUOTE_TAGS:
             self._aligns.append(align)
-            self._start(BlockKind.QUOTE, align=align)
+            self._start(BlockKind.QUOTE, align=align, anchor_ids=anchors)
             return
         if tag == "pre":
             self._aligns.append(align)
-            self._start(BlockKind.PREFORMATTED, align=align)
+            self._start(BlockKind.PREFORMATTED, align=align, anchor_ids=anchors)
             return
         if tag == "li":
             self._aligns.append(align)
@@ -596,15 +728,20 @@ class _TolerantParser(HTMLParser):
                 level=max(0, len(self._lists) - 1),
                 list_ordered=bool(self._lists and self._lists[-1]),
                 align=align,
+                anchor_ids=anchors,
             )
             return
         if tag in _BLOCK_TAGS:
             self._aligns.append(align)
-            self._start(BlockKind.PARAGRAPH, align=align)
+            self._start(BlockKind.PARAGRAPH, align=align, anchor_ids=anchors)
             return
 
         self._inline_stack.append((tag, self.inline))
         self.inline = _inline_from_attributes(tag, attributes, self.inline)
+        if anchors:
+            # The same as the XML path: an id on an inline element names the place in
+            # the paragraph the text around it lands in.
+            self._builder().anchor_ids.append(anchors[0])
 
     def _emit_image(self, attributes: dict[str, str]) -> None:
         self._finish()
@@ -621,13 +758,14 @@ class _TolerantParser(HTMLParser):
                 kind=BlockKind.IMAGE,
                 image=ImageRef(resolved, width, height, attributes.get("alt", "")),
                 align=self._aligns[-1],
+                anchor_ids=self._take_orphans() + _anchor_from(attributes),
             )
         )
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
         if tag in _SKIP_TAGS:
-            if self._skip:
+            if tag not in _VOID_TAGS and self._skip:
                 self._skip -= 1
             return
         if self._skip or tag in _VOID_TAGS:
@@ -661,6 +799,7 @@ class _TolerantParser(HTMLParser):
 
     def finish(self) -> tuple[Block, ...]:
         self._finish()
+        self._attach_trailing_anchors()
         return tuple(self.blocks)
 
 

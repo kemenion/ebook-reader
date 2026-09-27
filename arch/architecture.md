@@ -483,7 +483,7 @@ ReaderController 求新偏移并判断是否越过本节两端
 | **理由** | ① 「栏属于书」与「目录随书出现」自洽：有书才有地图，没书就没有栏，顺带消掉「关书后左栏残留」这一类缺陷。② 右键层放**最底层**：鼠标事件按 z 序自上而下派发，只声明右键的 MouseArea 不会截住左键（左键被上层的点击区 FR-062 先取走），而未被子项接受的右键会一路下传到这里——正文、面板、状态栏都覆盖得到。放最底层而不是最上层，是因为这一层只接「别人不要的」右键：将来任何面板行想自己处理右键，不会被这层抢走。③ 平铺而非多级子菜单：读者找的是「目录在哪」，多一级就多一次失败机会；把 6 个值型行放进子菜单，菜单才稳定在约 670 px（默认窗口内容高 1348 px；最小窗口时菜单可滚动）。④ 「常驻」比「能打开」更接近读者的实际用法：地图是用来反复对照的，跳一次就消失等于每次都要重找入口。⑤ 按钮的开关态同样由控制器单向驱动（自定义 `checked`，不用 `checkable`）：QQC2 的 checkable 按钮会先自翻 `checked` 再发 `clicked`，绑定被覆盖后按钮与面板会各说各话。⑥ 面板之间只在**争同一块空间**时相让，是 ADR-014 三栏布局的自然推论：目录占左栏、大纲占右栏、抽屉浮在右侧，所以抽屉只与大纲互斥。 |
 | **已否决** | ① 只加提示文案（在状态栏写「右键看菜单」）：提示还在屏幕边缘，不解决问题。② 用 `MenuBar` / 工具栏：占纵向空间，与「沉浸阅读」冲突。③ 用 `checkable: true` 让 QQC2 自己管勾选：点击会先翻 `checked`，绑定被覆盖后状态与控制器不一致。④ 全部平铺（29 行、约 930 px）：最小窗口下要滚动才看得到「退出」，得不偿失。⑤ 另加一条顶部工具栏承载开关：占纵向空间，与「沉浸阅读」冲突（同②），而状态栏本来就在页框之外且处处可见。⑥ 让目录栏「永不收起」（连 `T` 都不响应）：读者一旦想全宽阅读就没有退路，正确做法是常驻 + 一键收起。 |
 | **后果（代价）** | ① 菜单把 21 个操作与快捷键抄了一份，是**刻意的重复**：新增操作必须同时改 `ReaderMenu.qml`，`test_menu.py` 用「每一项都存在、且不多不少」钉住这份清单。② 打开书时多一次重排：目录栏展开 → 正文栏宽变化 → 本节重排（与开关侧栏同一量级，20–72 ms；当时的日志行 `first page ready`（现为 `first window ready`）由 86–92 ms 变为 114–123 ms，数字为 ADR-016 之前的实测，NFR-001 余量仍充足）。③ 右键层在最底层，面板行自身失去右键语义（当前无此需求）。④ 目录栏常驻之后，读者若想全宽阅读需要一次显式操作（`T` / 按钮 / `Esc` / 右键菜单，四个入口），而状态栏因此多了一个控件：它的开关态必须继续由控制器单向驱动，`StatusBar.qml` 只是画出来（`checked` 是绑定，不是状态）。 |
-| **验证** | `test_menu.py`（9 项）：真事件右键在正文 / 目录栏 / 状态栏三处都能弹出且弹在鼠标处；21 行 + 14 个子菜单项全部存在、且不多不少；无书时整行置灰、已开栏带勾选；**真点击**「下一章」真的换章、「主题 → 夜间」真的换主题（子菜单两跳全程鼠标）；右键点滚动条只弹菜单（偏移不变），同一处左键真的滚动。`test_layout.py`：开书后左栏可见且三栏 x/width 相接；关书后两栏消失、宽度归还正文；开设置抽屉后左栏**仍在**、页框不变。`test_toc_panel.py`（5 项）：状态栏「目录」按钮**真点击**即显示 / 隐藏，页框跟着正文栏宽走；按钮在页框之外（状态栏内）且点击不滚动；无书时置灰、点击不产生副作用；**真点击**目录项跳转后左栏仍在、高亮跟随；点章节 / 滚动 / 开大纲都不收起目录，只有 `T` / `Esc` 收起。 |
+| **验证** | `test_menu.py`（9 项）：真事件右键在正文 / 目录栏 / 状态栏三处都能弹出且弹在鼠标处；21 行 + 14 个子菜单项全部存在、且不多不少；无书时整行置灰、已开栏带勾选；**真点击**「下一章」真的换章、「主题 → 夜间」真的换主题（子菜单两跳全程鼠标）；右键点滚动条只弹菜单（偏移不变），同一处左键真的滚动。`test_layout.py`：开书后左栏可见且三栏 x/width 相接；关书后两栏消失、宽度归还正文；开设置抽屉后左栏**仍在**、页框不变。`test_toc_panel.py`（6 项）：状态栏「目录」按钮**真点击**即显示 / 隐藏，页框跟着正文栏宽走；按钮在页框之外（状态栏内）且点击不滚动；无书时置灰、点击不产生副作用；**真点击**目录项跳转后左栏仍在、高亮跟随；同一文件里的上下两项分别落在列首与锚点所在块（ADR-017）；点章节 / 滚动 / 开大纲都不收起目录，只有 `T` / `Esc` 收起。 |
 
 ### ADR-016 主阅读模式为**连续滚动列**（取代 ADR-004 的分页；ADR-007 作废，ADR-008 的单位改为「窗口」）
 
@@ -494,7 +494,29 @@ ReaderController 求新偏移并判断是否越过本节两端
 | **理由** | ① **问题整类消失**：没有页边界，就没有「跨页切断」，也就没有边界修正、迭代收敛、降级与修正留白——ADR-007 要解决的事在连续列里不存在。② **位置更简单**：偏移是列的自然坐标，字号 / 栏宽变化后按块回填（`block_offset(anchor)`）即可。③ **渲染更省**：窗口只比页框多 32 px，而量子内的每一帧都不进 Python，比「每页全量光栅化 + 翻页动画」更轻。④ **Qt 天然支持**：`QTextDocument` 不定高、`documentLayout().documentSize()` 直接给列高，排版仍是一次 pass，未引入任何新机制。⑤ 与「沉浸阅读」的定位一致：读的是文字流，不是纸。 |
 | **已否决** | ① **两套模式并存**（分页 + 连续）：位置、缓存、大纲、菜单、测试都要两套，而分页那一套的问题没有一个是连续模式也需要的。② **任意偏移渲染**（不对齐量子）：滚一格就重新光栅化整窗（9–17 ms），跟手性会丢；量子对齐把量子内变成纯平移。③ **相邻节拼接成一列**（真·全书连续滚动）：要同时持有两个 `QTextDocument` 并做偏移换算、跨文档图片预取与位置记忆——ADR-003 的取舍不变。④ **QML 直接用 `TextEdit` / `TextArea` 滚动**：ADR-008 已否决的编辑场景接口，样式与避头尾注入都失控。⑤ **`QGraphicsView` / `QScrollArea` 包 `QTextDocument`**：回到「每帧 Python 绘制」的老路（ADR-008）。 |
 | **后果（代价）** | ① **节尾留白仍在**（节是列的单位）：`max_offset` 之后就是下一节，ADR-003 的代价如实保留。② 位置恢复是**按块回填**而非像素级精确：字号变化后落在同一块的行首附近（ADR-011 的验证仍成立）。③ **没有页码**：状态栏只能报百分比，「翻到第 120 页」这种用法不再存在。④ 窗口位图比页位图多 32 px 高，并新增 `ReaderController._window_cache`（5 张 LRU，ADR-008 的代价）。⑤ 大纲失去「按页切片」这一兜底，只在有标题的节出现。⑥ **一次性重写**：`test_typeset.py` 整体改为面向列的断言，任何引用「页」的文档段落都要重写（本次一并完成）。 |
-| **验证** | `tests/integration/test_typeset.py`（22 项，全部面向列）：窗口几何 = 页框 + 1 量子；列高 = `document.size().height()` 且 `clear()` 后重建可复现；块↔偏移双向映射（`block_at_offset` 是「不晚于 offset 的最后一个块」，同顶多块时取其中一个）；418 张图在列中的矩形与显示尺寸偏差 ≤ 0.497 px（容差 1.0）；标题与正文间距 1.04–1.45 行步（上界 2.0）；禁则字符不当行首；两本参考书的**全部节**都能排版；节 ≤ 50 ms（NFR-003）、窗口 ≤ 20 ms（NFR-004，测 8 个窗口取最差）。`tests/integration/test_scroll_view.py`（19 项）：量子内滚动复用同一张位图、`windowOffset` 落在量子网格上、方向键一行 / 翻屏键一屏 / `]` `[` 换节、章末那一行进入下一章、滚动条比例 = 列长。`tests/integration/test_outline.py`：大纲只列本节标题、高亮跟随偏移。 |
+| **验证** | `tests/integration/test_typeset.py`（22 项，全部面向列）：窗口几何 = 页框 + 1 量子；列高 = `document.size().height()` 且 `clear()` 后重建可复现；块↔偏移双向映射（`block_at_offset` 是「不晚于 offset 的最后一个块」，同顶多块时取其中一个）；418 张图在列中的矩形与显示尺寸偏差 ≤ 0.497 px（容差 1.0）；标题与正文间距 1.04–1.45 行步（上界 2.0）；禁则字符不当行首；两本参考书的**全部节**都能排版；节 ≤ 50 ms（NFR-003）、窗口 ≤ 20 ms（NFR-004，测 8 个窗口取最差）。`tests/integration/test_scroll_view.py`（22 项）：量子内滚动复用同一张位图、`windowOffset` 落在量子网格上、方向键一行 / 翻屏键一屏 / `]` `[` 换节、章末那一行进入下一章、`linear="no"` 的节被 `]` `[` 跨过、滚动条比例 = 列长；**滚轮两种事件形态**各按文档写明的量位移（一格 = `wheelStep`、纯 `pixelDelta` = 像素数、半个格子按比例，FR-063）。`tests/integration/test_outline.py`：大纲只列本节标题、高亮跟随偏移。 |
+
+### ADR-017 目录项的两个目标分开：`href` 解析到**节**，`#frag` 解析到**块**（FR-014 / FR-017）
+
+| 项 | 内容 |
+|---|---|
+| **背景** | 目录项写的是一个 URI（`index_split_007.xhtml#filepos10484`），它同时回答两个问题：**哪一节**、**节里哪个位置**。v1 只回答了第一个——`join_href()` 按设计丢掉 fragment（它不是 ZIP 条目名的一部分），于是第二个问题从未被问过。这在「一节一项」的书（康波，26 项 / 27 节）里完全看不出来；币安（28 项 / 35 节）有 4 个文件各承载两项，丢掉锚点后两行都跳到文件开头——目录对读者说了谎，而且是可验证的谎。容错解析路径（格式不合法的文档）更彻底：它从不读 `id`，这类书的锚点全部无效。 |
+| **决策** | ① **两个目标分开存**：`TocEntry.href` 仍是节路径（解析到 spine 序号），新增 `TocEntry.fragment`（百分号解码后）保存锚点；`section_index_for_href()` 显式忽略 fragment，`goToTocRow()` 用 `entry.fragment` 调 `LaidOutSection.anchor_block()`。② **锚点归属**：`id` 落在**不产生块的元素**上（`<div id>` 只包住别的块、空 `<p id>`、空 `<a id>`——EPUB2 的 `filepos` 标记全属此类）时，交给**其后的第一个块**；文档末尾的这种标记交给**最后一个块**。③ **容错解析路径也抽 `id`**（原先完全不读，等于这类书锚点全灭）。④ **高亮按位置判定**：`currentTocRow` = 「已越过其锚点的最后一项」（FR-017），不再是「该节的第一项」；跨节滚动时只在**行确实变化**时发 `tocChanged`，不在每个滚动刻度上重建目录行。 |
+| **理由** | ① 两个问题是两个问题：节用 spine 序号回答（要能跨节比较大小、要能记住），块用「从节顶往下多少像素」回答（要跟着排版走）。合成一个字符串就会像 v1 那样丢一半。② 「锚点归下一个块」是**结构**判断，不需要书的名字、不需要发布者的习惯：`id` 标的是「从这里开始」，而不产生块的元素自己没有「这里」。③ 末尾标记归最后一块：那里确实没有下一块，它标的是「前面那段的末尾」。④ 高亮按位置走是同一规则的必然结果——若仍按「文件」判定，同一文件里的第二项永远不可能被高亮。 |
+| **已否决** | ① 把 fragment 留在 `href` 里：解析链上每一处（spine 查找、路径归一化、ZIP 查找）都要记得剥掉它，漏一处就是一次静默失败，而 v1 正是这么失败的。② 用「行文本 = 目标段落文本」定位锚点：对已经写着 `id` 的锚点是纯属多余的猜测（该手段留给没有 nav / ncx 的书，见 FR-012）。③ 锚点找不到时**回退到估位**（按块序号等分）：那会让「跳得准」与「跳得偏」在观感上无法区分。 |
+| **后果（代价）** | ① `Block.anchor_ids` 现在会带上「字面上不属于这个块」的 id（来自它前面的空标记），语义是「这个位置从这块开始」——`anchor_block()` 的文档已按此写明。② 锚点超出可滚动范围（`max_offset`）时 `block_offset()` 照旧 clamp：短节里的深锚点只能落到节尾（币安 §4 正文 1280 px、窗口 1380 px，正是这种情况）——这是连续列里正确的观感，但意味着「落在锚点所在块」这类断言只能在**可滚动**的节上验证。③ `_TolerantParser` 新增 `id` 收集、两个 walker 各新增一份 `_orphans` 状态，是这条路线的必要成本。 |
+| **验证** | `tests/unit/test_toc.py`（13 项）：两种目录格式各自的锚点保留、百分号解码、手写 `TocEntry` 的默认值、`section_index_for_href()` 忽略锚点、币安「同一文件两项、其中一项带锚点」的解析解、**参考书全部锚点都能解析**（币安 9/9）、28 项目标两两不同。`tests/unit/test_sanitizer.py`（+6 项）：`<div id>` 包裹、空标记、包裹与首块各带 `id`、末尾标记、图片包裹、容错路径。`tests/integration/test_toc_panel.py`：真点击同一文件的上下两项，分别落在列首与锚点所在块，且高亮跟着走。 |
+
+### ADR-018 滚轮：`angleDelta` 与 `pixelDelta` **分开处理**，换算放在控制器里（FR-063）
+
+| 项 | 内容 |
+|---|---|
+| **背景** | 滚轮事件有两种形态，而它们**符号约定相反**：`angleDelta` 以「八分之一度」计数，轮子远离用户为正（所以向下滚是负）；`pixelDelta` 是屏幕距离，向下滚为**正**（Qt 文档：「用于直接滚动内容」）。鼠标滚轮只发前者（一格 120 单位）；触控板、高精度滚轮与 Wayland 的平滑 / 自由滚动**只发后者**（角度恒零）。v1 只读 `angleDelta` 并除以 120，于是第二种形态恒等于 0 px——事件到达、被接受、页面不动（缺陷 16）。 |
+| **决策** | ① 换算收进控制器：`_wheel_distance(angle_y, pixel_y, wheel_step)`，纯函数，无 Qt 依赖；`ReaderController.wheelScroll()` 是 QML 唯一入口，QML 只转发两个 delta 并 `event.accepted = true`。② 规则：`angleDelta` 非零 → `-angle / 120 × wheelStep`（一格 = 3 行 = `wheelStep`，与键盘同一套行高）；为零且 `pixelDelta` 非零 → `pixelDelta` **原样**（像素就是像素）；两者皆零（`ScrollBegin`/`ScrollEnd` 等相位事件）→ 0，且不触发重绘。③ 同时有值时**以角度为先**：那是一个真正的滚轮格，而 Qt 明确说明 `pixelDelta` 依驱动而定、X11 下不可信。 |
+| **理由** | ① 两种形态答的是同一个问题（往哪儿滚、滚多远），但单位不同，**必须分别换算**，不能相加也不能互相折算。② 位置放在控制器而不是 QML：能单测（`test_wheel.py` 12 项无需 Qt），且滚轮、方向键、菜单三处共用同一套「距离」单位（FR-073）。③ 一格 = 3 行沿用浏览器习惯，像素形态则忠实于设备——平滑手势本来就该跟手，而不是被折成整行。 |
+| **已否决** | ① 把 `pixelDelta` 折成「行数」再乘 `wheelStep`：等于把设备量到的距离再放大三倍，触控板会飞。② 两个 delta 相加：两种形态同时出现的设备会双倍滚动。③ 在 QML 里做算术（v1 的做法）：既无法单测，两个相反的符号约定又极易被下一个人搞混——缺陷 16 就是这么发生的。④ 改用 `Flickable` / `TextArea` 承载滚动：ADR-016 / ADR-008 已否决（样式与避头尾注入失控、每帧回到 Python）。 |
+| **后果（代价）** | ① 触控板位移忠实于设备，不同机器的「一格」观感因此不同——这是平台行为，不是本应用的选择。② 两种形态各需一组测试（已补）。③ 若某平台两种 delta 都为零（目前无实例），事件会静默不动；定位手段是 `QT_LOGGING_RULES=ebook_reader=DEBUG` 下的 `wheel angle=… pixel=… -> … px` 调试行，以及一段二十行的 Qt 小程序（把每个事件的 `angle`/`pixel`/`phase`/`device` 打出来）——换机器复现滚轮问题时先看形态，再谈代码。 |
+| **验证** | `tests/unit/test_wheel.py`（12 项）：一格的量与方向（±120 = ±`wheelStep`）、纯 `pixelDelta` 不翻符号、两种形态方向一致、同时有值时以角度为先、相位事件为 0、半步按比例。`tests/integration/test_scroll_view.py`（真 `QWheelEvent`）：一格位移 = `wheelStep`、纯 `pixelDelta` 位移 = 像素数、半格 = `wheelStep/2`、轮子在面板上时正文不动（两种形态都测）。 |
 
 ---
 
@@ -506,17 +528,19 @@ ReaderController 求新偏移并判断是否越过本节两端
 
 ```
 BookMeta           书名、作者、语言、出版社、唯一标识(identifier)、封面资源路径
-EpubBook           元数据 + spine 列表 + manifest + 目录树 + 资源访问器
-  ├─ spine: list[SpineItem]        按阅读顺序
+EpubBook           元数据 + spine 列表 + manifest + 目录树 + 地标 + 资源访问器
+  ├─ spine: list[SpineItem]        按阅读顺序（每项带 linear 标记）
   ├─ manifest: dict[id, ManifestItem]
   ├─ toc: list[TocEntry]           树形，支持多级
+  ├─ landmarks: list[Landmark]     书声明的卷 / 部位起点（EPUB 3 landmarks）
   └─ resource(path) -> bytes       按需读取 ZIP 条目
-SpineItem          index(序号)、href(相对路径)、media_type、id
+SpineItem          index(序号)、href(相对路径)、media_type、id、linear(是否属于正文阅读顺序)
 ManifestItem       id、href、media_type、properties
-TocEntry           title、href(可含 #frag)、children: list[TocEntry]、level
+TocEntry           title、href(到节，不含锚点)、fragment(#frag 单独保存)、children: list[TocEntry]、level
+Landmark           type(epub:type)、title、href、fragment
 ```
 
-**关键约束**：`SpineItem.media_type` 是判定「是否为可渲染文档」的**唯一依据**（I-1），`href` 不参与类型判断。
+**关键约束**：`SpineItem.media_type` 是判定「是否为可渲染文档」的**唯一依据**（I-1），`href` 不参与类型判断；`linear="no"` 只影响「上一章 / 下一章」的顺序阅读，不改变节号、目录跳转与寻址（FR-016）。
 
 ### 6.2 内容层模型（Block，纯数据，零 Qt 类型）
 
@@ -646,6 +670,8 @@ ebook-reader/
 │   │   ├── test_sanitizer.py        脏 HTML → Block，字符守恒
 │   │   ├── test_kinsoku.py          WJ 注入正确性
 │   │   ├── test_outline_text.py     大纲标签规则（去掉 WJ、折叠空白；FR-018）
+│   │   ├── test_toc.py              目录项的两个目标（节 / 锚点；FR-014、ADR-017）
+│   │   ├── test_wheel.py            滚轮两种事件形态的换算（FR-063）
 │   │   └── test_images.py           文件头尺寸预读
 │   └── integration/                 需 QGuiApplication（offscreen）
 │       ├── conftest.py              shell fixture + 共用工具（开窗、点击、等待）
@@ -663,15 +689,15 @@ ebook-reader/
 
 | 模块 | 职责 | 依赖 | 行数（`wc -l` 实测） | 对应需求 |
 |---|---|---|---|---|
-| `domain/models.py` | 数据契约（Block/Span/ImageRef/Book + BlockKind/BlockAlign） | stdlib | 160 | — |
+| `domain/models.py` | 数据契约（Block/Span/ImageRef/Book + BlockKind/BlockAlign） | stdlib | 190 | — |
 | `domain/errors.py` | 异常层次 | stdlib | 31 | — |
-| `domain/epub/container.py` | 定位 OPF | stdlib | 51 | FR-002 |
-| `domain/epub/opf.py` | 元数据/清单/spine | stdlib | 187 | FR-003, FR-004 |
-| `domain/epub/toc.py` | nav + ncx 目录树 | stdlib | 126 | FR-010~013 |
+| `domain/epub/container.py` | 定位 OPF | stdlib | 54 | FR-002 |
+| `domain/epub/opf.py` | 元数据/清单/spine（含 `spine@toc`、`linear`） | stdlib | 232 | FR-003, FR-004, FR-011, FR-016 |
+| `domain/epub/toc.py` | nav + ncx 目录树 + landmarks（含容错读取器） | stdlib | 412 | FR-009~013 |
 | `domain/epub/paths.py` | 路径归一化 | stdlib | 62 | FR-005, FR-006 |
 | `domain/epub/images.py` | 尺寸预读 | stdlib | 110 | ADR-006 |
-| `domain/epub/book.py` | 组装 + 统一接口 | stdlib | 265 | FR-007 |
-| `domain/html/sanitizer.py` | **核心**：脏 HTML → Block | stdlib | 668 | FR-020~027 |
+| `domain/epub/book.py` | 组装 + 统一接口 | stdlib | 322 | FR-007, FR-016 |
+| `domain/html/sanitizer.py` | **核心**：脏 HTML → Block（含 `<base>` 重定基准） | stdlib | 807 | FR-005, FR-020~027 |
 | `domain/html/kinsoku.py` | **核心**：WJ 注入 | stdlib | 108 | FR-031 |
 | `typeset/settings.py` | 排版设置 + `PageGeometry` | QtGui | 293 | FR-032~037 |
 | `typeset/style.py` | Block → 格式对象 | QtGui | 256 | ADR-002 |
@@ -679,13 +705,13 @@ ebook-reader/
 | `typeset/engine.py` | **核心**：连续列排版 + `LaidOutSection` + 节 LRU | QtGui | 388 | FR-050~053, ADR-003 / ADR-016 |
 | `typeset/images.py` | **核心**：懒解码 + LRU | QtGui | 181 | FR-054, ADR-006 |
 | `typeset/renderer.py` | 窗口 → QImage（量子对齐） | QtGui | 98 | FR-056~058, ADR-008 / ADR-016 |
-| `app/controller.py` | 状态机 + QML 接口 + 窗口位图 LRU | QtCore/QtGui | 1150 | FR-060~067 |
+| `app/controller.py` | 状态机 + QML 接口 + 窗口位图 LRU | QtCore/QtGui | 1251 | FR-016, FR-060~067 |
 | `app/page_item.py` | `PageItem`：贴窗口位图、量子内平移 | QtQuick | 137 | FR-056~058, ADR-016 |
 | `app/settings_store.py` | JSON 持久化 | stdlib | 199 | FR-080~083 |
 | `app/main.py` | 启动引导 | QtQml/QtQuick | 110 | FR-001 |
-| QML（7 文件） | 界面 | — | 1,562 | FR-090~092 |
+| QML（7 文件） | 界面 | — | 1,566 | FR-090~092 |
 
-**合计 6,423 行**（Python 4,861 + QML 1,562），其中标注「核心」的四个模块是质量与性能的关键路径。（表内不含各 `__init__.py` 与 `__main__.py`，它们计入合计。）
+**合计 7,088 行**（Python 5,522 + QML 1,566），其中标注「核心」的四个模块是质量与性能的关键路径。（表内不含各 `__init__.py` 与 `__main__.py`，它们计入合计。）
 
 ### 7.3 分层依赖铁律（Code Review 检查项）
 
@@ -762,21 +788,23 @@ ebook-reader/
 
 原则：**只测重点核心功能**，快速、无 GUI 依赖优先（NFR-023 的 10 秒预算针对纯 Python 单元套件，实测 0.95 s；集成套件每项都要真开一次 QML 窗口并打开一本真书，约 0.7 s/项，见 §12.7）。不追求覆盖率数字，追求「关键风险点被守住」。
 
-### 9.1 单元测试（`tests/unit/`，纯 Python，预期 < 2s）
+### 9.1 单元测试（`tests/unit/`，纯 Python，145 项）
 
 只覆盖**最容易出错且无 GUI 依赖**的部分，全部使用真实书籍数据：
 
 | 测试文件 | 测什么 | 为什么值得测 |
 |---|---|---|
-| `test_epub.py` | ① 两本真书都能打开；② **25 个无扩展名文档被正确识别**（I-1）；③ spine 顺序正确（27 / 35）；④ 图片资源路径全部命中（408 / 53）；⑤ 目录树非空且层级正确 | 解析错误会导致一切失效；I-1 是本项目最易踩的坑 |
-| `test_sanitizer.py` | ① 脏 HTML（4044 `<b>` + 2303 `<span>` + 554 `<div>`）产生的块数合理；② **字符守恒**：Block 文本总长 vs 原始文本长度差异 < 1%（R-09）；③ 图片块被正确识别（含 `<div><img>` 嵌套）；④ `head/meta/link/style` 不泄漏为文本 | 决定内容是否丢失，是最高风险点 |
+| `test_epub.py` | ① 两本真书都能打开；② **25 个无扩展名文档被正确识别**（I-1）；③ spine 顺序正确（27 / 35）；④ 图片资源路径全部命中（408 / 53）；⑤ 目录树非空且层级正确；⑥ 合成书验证**书自己声明**的指针：`spine@toc` 指到的 NCX 即使 media-type 写错也读得出目录（缺陷 20）、`linear="no"` 的文档被顺序阅读跨过而仍可寻址（缺陷 21）、声明了 `gbk` 的包文档仍读得出书名与作者（缺陷 23）；⑦ 两本真书 `linear` 全为真，换节就是 `±1`（规则不误伤参考书） | 解析错误会导致一切失效；I-1 是本项目最易踩的坑；⑥⑦ 测的是真书里没有样本、只能靠合成书写出来的规则 |
+| `test_sanitizer.py` | ① 脏 HTML（4044 `<b>` + 2303 `<span>` + 554 `<div>`）产生的块数合理；② **字符守恒**：Block 文本总长 vs 原始文本长度差异 < 1%（R-09）；③ 图片块被正确识别（含 `<div><img>` 嵌套）；④ `head/meta/link/style` 不泄漏为文本（含**不带斜杠**的空元素，缺陷 22）；⑤ `<base href>` 重定基准后图片与链接都落在正确目录（缺陷 19）；⑥ 声明 `gbk` 的章节按自己的编码解码（缺陷 23） | 决定内容是否丢失，是最高风险点；`<base>`、空元素与编码这三条都是「读成字符串才看得见」的规则，只有单测钉得住 |
 | `test_kinsoku.py` | ① 禁行首字符前确实插入了 WJ；② 禁行尾字符后确实插入了 WJ；③ 无重复注入；④ 注入后**除 WJ 外文本不变**（字符守恒） | 决定排版观感，纯字符串逻辑极易写错 |
 | `test_images.py` | ① JPEG 尺寸预读正确（对 5 张真实图人工核对）；② PNG 尺寸预读正确；③ 损坏数据不抛异常（返回 None） | ADR-006 的基础，错了会导致版面错乱 |
 | `test_outline_text.py` | ① 空白归一化（连续空白 / 换行折叠为单个空格）；② U+2060 被剥离（WJ 只服务于排版，不该出现在读者眼前，FR-109）；③ 长标题**原样保留不截断**（列会换行；「取首句」规则随按页回退一起作废，ADR-016）；④ 空标签 → 空串，面板据此丢掉该行 | 大纲标签的取值规则（FR-018），纯字符串逻辑，错了会直接显在 UI 上 |
+| `test_toc.py` | ① 两种目录格式（nav / ncx）的行都保留 `#frag` 并百分号解码；② 手写 `TocEntry` 的默认值（无锚点）；③ `section_index_for_href()` 忽略锚点、锚点不影响节号；④ 参考书的**每个锚点都能解析到块**、28 项目标两两不同；⑤ 六种畸形 nav（平铺 `<a>` / `ul` 嵌套 / 未闭合 `<li>` / 裸 `&` / 没有 `epub:type` / 声明 `gbk`）与未闭合 `navPoint` 的 NCX 都读得出条目，解码按文档自己的声明（缺陷 18、23）；⑥ landmarks 只认自己声明 `epub:type="landmarks"` 的 `<nav>`，且不混进目录（FR-009） | ADR-017 的规则本身；丢锚点是「目录对读者说谎」这类缺陷的唯一入口，且只有真实书才会暴露；⑤⑥ 测的是真书里没有的样本 |
+| `test_wheel.py` | ① `angleDelta` 一格的位移与方向（±120 = ±`wheelStep`）；② 只有 `pixelDelta` 时按像素原样、不翻符号；③ 两种形态**方向一致**；④ 同时有值时以角度为先（X11 的 `pixelDelta` 不可信）；⑤ 相位事件（两者皆零）位移为 0 | FR-063 的全部算术。纯函数、无 Qt，是「鼠标滚轮没反应」这类缺陷最快的回归防线 |
 
 **明确不测**：Qt 自身行为（断行位置、整形的像素细节）、QML 渲染、真机 GPU 表现——这些用 P0 手工实测代替。
 
-### 9.2 集成测试（`tests/integration/`，`QT_QPA_PLATFORM=offscreen`，78 项）
+### 9.2 集成测试（`tests/integration/`，`QT_QPA_PLATFORM=offscreen`，82 项）
 
 只用**真实中文内容**跑通端到端链路（排版、渲染、控制器与三栏布局），并顺带断言性能指标：
 
@@ -794,7 +822,7 @@ ebook-reader/
 | `test_typeset.py::test_every_section_of_both_books_can_be_laid_out` | 两本参考书的**全部节**都能排成一列（含无标题节、含图节） |
 | `test_typeset.py`（图片缓存 5 项） | 懒解码 + LRU 双限、命中、绝不放大、缺资源返回空（ADR-006） |
 | `test_typeset.py::test_section_cache_evicts_old_sections` | 节 LRU 上限（ADR-003） |
-| `test_scroll_view.py` | ① 方向键一行 / 翻屏键一屏 / `]` `[` 换节 / Home End；② 滚轮按步长滚动；③ **量子内滚动复用同一张位图**（`windowOffset` 不变），跨量子才换图；④ 滚动条比例 = 列长，列装得下一屏时不出现；⑤ 章末那一行真的进入下一章（FR-060~067 / ADR-016） |
+| `test_scroll_view.py` | ① 方向键一行 / 翻屏键一屏 / `]` `[` 换节 / Home End；② 滚轮按步长滚动；③ **量子内滚动复用同一张位图**（`windowOffset` 不变），跨量子才换图；④ 滚动条比例 = 列长，列装得下一屏时不出现；⑤ 章末那一行真的进入下一章；⑥ 合成书里 `linear="no"` 的文档被 `]` `[` 跨过（FR-016 / FR-060~067 / ADR-016） |
 | `test_outline.py` | ① 大纲行 = 本节标题、缩进层级；② 高亮跟随当前偏移；③ 点击跳到该标题的偏移；④ 无标题的节不提供该栏；⑤ 重排（改字号 / 开关侧栏）后按新栏宽重建（FR-018 / FR-019 / ADR-016） |
 | `test_layout.py` | ① 窗口默认尺寸与最小宽度；② 三栏 `x`/`width` 相接、无重叠无缝；③ 交给 Python 的页框 = 正文栏宽；④ 无内容时右栏不出现且宽度归还；⑤ 窄窗口（720）下两栏仍可用；⑥ 设置抽屉不占栏、不动左侧目录、只有它会遮断点击区（FR-019 / FR-062 / ADR-014） |
 | `test_toc_panel.py` | ① 状态栏「目录」按钮**真点击**即显示 / 隐藏，`pageColumnWidth` 与交给 Python 的页框一起变化；② 按钮在页框之外，点击不滚动；③ 无书（或无目录）时置灰且点击不产生副作用；④ **真点击**目录项跳转后左栏仍在、高亮跟随；⑤ 点章节 / 滚动 / 开大纲都不收起目录，只有 `T` / `Esc` 收起（FR-013） |
@@ -915,7 +943,7 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q
 
 **页边界类指标的去向（ADR-016）**：连续列没有页边界，于是「图片被页边界切断」与「标题成为页末孤立块」这两条**整类消失**——ADR-007 的迭代修正机制也随之删除。它们的位置由两条新断言接管：`test_no_figure_is_squeezed_or_overlapped_by_the_column`（418 张图在列内的矩形偏差 ≤ 0.497 px，容差 1.0）与 `test_a_heading_has_its_text_right_below_it`（标题与其正文的间距 ≤ 2 行步，实测最差 1.45）。
 
-### 12.3 开发过程中发现并修正的 15 个真实问题
+### 12.3 开发过程中发现并修正的 23 个真实问题
 
 这些问题都是**实测才暴露**的，全部已修复并加了防护（注释或测试）：
 
@@ -936,6 +964,14 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q
 | 13 | 深色 / 米色主题下右键菜单仍是**白底黑字**的浮空白块 | 活动样式是 **Fusion**，其菜单底用 `palette.base`、分隔线用固定的 `Fusion.darkShade`、箭头是位图；而本应用的主题色只写进面板自己的 QML，从未写进调色板，浮层因此拿不到主题色 | 菜单显式画背景 / 分隔线 / 三角箭头（面板也是这么做的），并把 `palette.base/text/highlight/…` 一并设上，供样式自绘的滚动指示器使用 | 浅色 / 深色两张真实截图逐点核对像素颜色 |
 | 14 | 点目录项跳转后左栏**自己消失**，想连着看两章就得每次重按 `T`；文档则写着「点击后不收起」（FR-015 已由 ADR-014 作废、FR-018、README 三处一致） | 浮层时代的规则留在代码里没删：`goToTocRow()` 末尾仍写 `self._toc_visible = False; layoutChanged.emit()`，而 ADR-014 把面板改成占邻栏之后，这条「点完就收」已经不成立 | 删掉那两行（`goToSection` 自己会发 `tocChanged`，高亮照常跟随） | `test_toc_panel.py` 用**真点击**目录项断言左栏仍在且高亮跟随；`test_layout.py` / `test_outline.py` 断言开设置抽屉后 `tocVisible` 仍为真 |
 | 15 | 按 `S` 打开设置抽屉，左侧目录栏**一起被收走**——读者只是想调字号，地图却没了 | 同样是浮层时代的耦合：`toggleSettings()` 打开时把 `_toc_visible` 与 `_outline_visible` 一起置假；三栏平铺后抽屉浮在**右侧**，与左侧目录并不争空间 | `toggleSettings()` 只让同侧的大纲栏让位；点击抽屉旁边改调新增的 `closeSettings()`（原来调 `closePanels()`，会顺手关掉目录） | `test_outline.py` 断言开设置后 `tocVisible` 仍为真、`closeSettings()` 后仍为真；`test_toc_panel.py` 断言 `S` 之后左栏仍在 |
+| 16 | 鼠标滚轮 / 触控板在 KDE Wayland 上**完全不动文字**：事件到达、被接受，页面纹丝不动 | `Main.qml` 只读 `angleDelta.y` 并除以 120；而触控板、高精度滚轮与 Wayland 的平滑 / 自由滚动**只发 `pixelDelta`**（`angleDelta` 恒为零），换算结果就是 0 px。QML 注释里还写着「平滑触控板按比例」，说明当初就是这么打算的——只是没有实现 | 换算移入控制器：`_wheel_distance(angle, pixel, step)` —— `angleDelta` 非零按 120 单位 = 一格（`-angle/120 × wheelStep`），为零时用 `pixelDelta` 原样位移（两者皆零的相位事件直接返回，不重绘）；QML 只转发两个 delta 并 `event.accepted = true` | `test_wheel.py`（12 项：两种形态的方向与量、半个格子按比例、相位事件、同时有值时以角度为先）+ `test_scroll_view.py` 用真 `QWheelEvent` 断言一格位移 = `wheelStep`、纯 `pixelDelta` 位移 = 像素数、面板上滚轮不动正文（两种形态都测） |
+| 17 | 币安目录里「同一文件的第二个条目」跳到文件开头，与上一个条目落点完全相同；左栏也永远只标第一个，第二项无法被高亮 | `join_href()` 按设计丢掉 `#frag`，`TocEntry` 无处存放它，`goToTocRow()` 只能再从 `href` 里 `partition("#")` —— 而那时 fragment 早已丢失；容错解析路径更是不读 `id`；`currentTocRow` 只比较「节」 | 见 **ADR-017**：`TocEntry.fragment` 单独保存、两种解析器都抽取；`id` 落在不产生块的元素上时归其后第一个块、文档末尾归最后一个块；`_TolerantParser` 补上 `id` 抽取；`currentTocRow` 改为按位置判定 | `test_toc.py`（含「参考书全部锚点可解析」9/9）、`test_sanitizer.py`（锚点归属 6 种情形）、`test_toc_panel.py`（真点击同一文件的两项）——详见 ADR-017 的验证行 |
+| 18 | 目录文档**只要不合 schema 就整篇作废**：`nav.xhtml` 里有一个裸 `&`、一个没闭合的 `<li>`，或 EPUB2 转换器写出的 `<ul>`，左栏就是空的，读者只剩 `h1`/`h2` 的粗目录 —— 而浏览器看同一个文件毫无怨言 | 两个解析器都先 `ET.fromstring()`，`ParseError` 直接 `return ()`；nav 只认 `<ol>`，且只认带 `epub:type="toc"` 的 `<nav>`；`_walk_nav_list()` 假设嵌套一定长在 `<li>` 里 | `parse_nav()` / `parse_ncx()` 先按 XML 读，失败就交给容错读取器（`_TolerantNavReader` / `_TolerantNcxReader`：`html.parser` + 手工维护的栈，也就是浏览器的做法）；`_first_list()` 接受 `ul` 与嵌套列表，`_flat_links()` 读平铺的 `<a>`；`_find_nav()` 在没人声明 `epub:type` 时取第一个 `<nav>`（地图宁可读也不可丢）；解码交给 `decode_text()`，尊重文档自己声明的编码 | `test_toc.py`：平铺 `<a>`、`ul` 嵌套、未闭合 `navPoint`、裸 `&`、`encoding="gbk"` 声明、无 `epub:type` 六种情形 |
+| 19 | 带 `<base href>` 的书**图片与链接全部指错**：文档在 `OEBPS/Text/`，`<base href="../">` 把基准指到 `OEBPS/`，而读者按「文档所在目录」拼路径，于是每一张图都找不到 | 路径解析只看当前文档的目录（`section_base_dir()`），从未读文档自己声明的基准；`<base>` 又恰好是「当成字符串读就看不见」的那种标签 | `_declared_base()` / `_declared_base_in_text()` / `_rebase()`：先读 `<base href>`，按浏览器的规则重定基准（以 `/` 结尾当目录，否则当「文件」取其所在目录），再用它解析该文档里所有相对 href；XML 与容错 HTML 两条路径同一规则 | `test_sanitizer.py`：`<base href="../">`、`<base href="Text/">` 与「基准指向文件」三种写法，图片与链接都落在重定后的目录 |
+| 20 | 一本既没有 `properties="nav"`、manifest 里 `toc.ncx` 的 media-type 又写错的 EPUB2，**目录读不出来** —— 尽管 `toc.ncx` 就在书里，`<spine toc="ncx">` 也指着它 | 找 NCX 只看 media-type（`application/x-dtbncx+xml`）；`<spine toc="…">` 这个**明确的指针**没人看 | `_spine_toc_href()`：按 media-type 找不到时，用 `spine@toc` 的 idref 回查 manifest（media-type 缺失或写错的书因此仍能读到目录） | `test_epub.py`：合成书里 NCX 的 media-type 故意写错，`spine@toc` 仍把目录读出来 |
+| 21 | 「下一章」把读者送进封面、版权页、广告页 —— 书里写着这些文档 `linear="no"`（出版方明说它不属于正文阅读顺序） | `SpineItem` 只有 `index/idref/href/media_type`，`linear` 丢在 OPF 里没人读；换节一律 `index ± 1` | `SpineItem.linear`（默认真，`linear="no"` 为假）；`EpubBook.next_section()` / `previous_section()` 走 `_step_section()`，跨过线性为假的文档；目录跳转与进度不受影响（只有顺序阅读跳过），这正是规范里这个属性的意思 | `test_epub.py`：合成 `linear_no` 书，`next_section()` / `previous_section()` 跳过被标记的节，直接跳到它上面仍然正常 |
+| 22 | 容错解析路径下整节正文**凭空消失**：文档头部写了 `<meta charset="utf-8">`、`<link …>` 这类不带斜杠的空元素 | `_TolerantParser` 的「跳过头」用计数出栈（进了几次 `head`/`style`/`script`，遇到对应闭合标签减一）；而 HTML 里空元素（`<base>` `<link>` `<meta>`）**从不闭合**，计数永远为正，`<body>` 之后的每个字都被当成头部内容丢掉 | `_VOID_TAGS` 白名单（`area/base/br/col/embed/hr/img/image/input/link/meta/param/source/track/wbr`）：跳过路径与正文路径都遇到即不入栈，闭合标签也不倒计数 —— 这也是「必须走容错路径」的书里最常见的一种写法 | `test_sanitizer.py`：头部空元素不带斜杠的文档，正文仍完整且字符守恒（同时补上第 17 行的 `id` 抽取） |
+| 23 | 老一点的中文书（尤其中文 EPUB2）**打开时直接抛异常**：`ValueError: multi-byte encodings are not supported` —— 尽管每个文件都在开头写清了自己的编码 | `xml.etree` 底下的 expat **只实现 UTF-8 / UTF-16**，遇到 `<?xml … encoding="gbk"?>`（`big5` 等同样）抛的是 **`ValueError` 而不是 `ParseError`**；而三个 XML 入口（nav、NCX、landmarks）与 `sanitize()` 都只 `except ET.ParseError`，于是这个异常一路穿出 `EpubBook.open()`，`try/except BookError` 也接不住 | ① 容错读取路径与 `sanitize()` 改为同时接住 `(ET.ParseError, ValueError)`，转而交给 `decode_text()`（它本来就按文档声明的编码解码）；② `parse_package()` 在 `ValueError` 时先解码、去掉 XML 声明再重解析（书名与作者正是最需要解码的那段文字）；③ `container.xml` 只剩路径、没有解码的价值，因此把 `ValueError` 归入可读的 `NotAnEpubError` | `test_toc.py`（`gbk` 声明的 nav 与 ncx）、`test_sanitizer.py`（`gbk` 章节）、`test_epub.py`（`gbk` 包文档仍读得出书名 / 作者） |
 
 ### 12.4 启动期 QML「读取 null 属性」错误的根因与修法（重要）
 
@@ -1024,13 +1060,15 @@ PageView.qml:23: Unable to assign null to QImage
 
 | 项 | 结果 |
 |---|---|
-| 测试总数 | **171**（单元 93 + 集成 78），`pytest --collect-only -q` 计数 |
-| 单元测试（纯 Python，无 Qt） | **93 项 / 0.92 s**（含解释器启动）——NFR-023 的 10 秒预算指的就是这一套 |
-| 集成测试（offscreen Qt） | **78 项 / 33.05 s**——每项都要真开一次 QML 窗口并打开一本真书，单价约 0.42 s |
-| 全量耗时 | **33.6 s**（一次跑完 171 项，实测 33.57 s） |
-| 结果 | **全部通过**（ADR-016 改写 `test_typeset.py`、新增 `test_scroll_view.py` 之后重测） |
+| 测试总数 | **227**（单元 145 + 集成 82），`pytest --collect-only -q` 计数 |
+| 单元测试（纯 Python，无 Qt） | **145 项 / 0.95 s**（含解释器启动）——NFR-023 的 10 秒预算指的就是这一套 |
+| 集成测试（offscreen Qt） | **82 项 / 35.59 s**——每项都要真开一次 QML 窗口并打开一本真书，单价约 0.43 s |
+| 全量耗时 | **36.2 s**（一次跑完 227 项，实测 36.21 s） |
+| 结果 | **全部通过**（ADR-016 改写 `test_typeset.py`、新增 `test_scroll_view.py` 之后重测；ADR-017 与滚轮修正后再测；缺陷 18~23 的可靠性加固与控制器接线后再测） |
 
-> 对比分页原型期（156 项 / 12.25 s）：集成项从 60 涨到 78（`test_scroll_view.py` 19 项、`test_outline.py` 从按页回退改为一套标题断言），单价也从 0.7 s 降到 0.43 s——因为连续列不再需要「逐页走完 + 分页修正」这类串行开销。§9.2 的原估计（「预期 < 8s」）同样是只有 3 个集成模块时的数字，已被实测取代。
+> 对比分页原型期（156 项 / 12.25 s）：集成项从 60 涨到 78（`test_scroll_view.py` 19 项、`test_outline.py` 从按页回退改为一套标题断言），单价也从 0.7 s 降到 0.42 s——因为连续列不再需要「逐页走完 + 分页修正」这类串行开销。§9.2 的原估计（「预期 < 8s」）同样是只有 3 个集成模块时的数字，已被实测取代。**ADR-017 与滚轮修正**再添 31 项（`test_wheel.py` 12 + `test_toc.py` 10 + `test_sanitizer.py` 6 + `test_scroll_view.py` 2 + `test_toc_panel.py` 1），集成单价升到 0.43 s 是因为新用例要打开币安（35 节 / 53 图的 EPUB2）并落到锚点上，而不是窗口或排版变慢——`test_typeset.py` 的 NFR-003 / NFR-004 断言在同一版代码上仍全绿。
+>
+> **可靠性加固（缺陷 18~23）**再添 5 项：`test_toc.py` 2（`gbk` 声明的 nav 与 ncx）、`test_sanitizer.py` 1（`gbk` 章节）、`test_epub.py` 1（`gbk` 包文档）、`test_scroll_view.py` 1（`linear="no"` 真的被 `]` `[` 跨过）。本轮同时把本表此前残留的旧计数校正到实测值（单元 121 → 145、总数 202 → 227），并把「已实现的规则」接到调用方上：`EpubBook.next_section()` / `previous_section()` 此前**没有任何调用者**，控制器仍在自己算 `±1`——一条没人问的规则等于不存在的规则，现在 `]`、`[`、菜单与章末那一行都走同一条路。
 
 集成测试中直接断言了本文档的性能指标（NFR-003 ≤ 50 ms、NFR-004 ≤ 20 ms）与质量指标（图片不被列挤扁或重叠、0 个违法行首、位置跨字号可恢复），使文档与代码不会脱节。三栏布局同样如此：`test_layout.py` 把 ADR-014 的算术（三栏相接、页框 = 正文栏宽）变成断言，`test_outline.py` 把 FR-018 的规则（大纲只列本节标题、高亮跟随偏移）钉在两本真书上，`test_menu.py` 把 ADR-015 的入口（右键、21 行每一项都在、点了真的生效）钉成断言，`test_toc_panel.py` 把 FR-013 的「常驻 + 一键开关」钉成断言——包括**真点击**状态栏按钮与**真点击**目录项，`test_scroll_view.py` 则把 ADR-016 的量子复用（同一窗口位图内滚动不换图）钉成断言。
 
@@ -1046,7 +1084,7 @@ PageView.qml:23: Unable to assign null to QImage
 | 产物 | `dist/ebook-reader` 62.1 MB（单文件）/ `dist/ebook-reader-dir/` 169.4 MB（文件夹） |
 | 依赖完整性 | `bundle.py check`：218 个 ELF、**0 个未解析库**、**0 个未解析 QML import** |
 | 真实 Wayland 实测 | 三种启动方式（文件夹版带书 / 文件夹版无参数 / 单文件版带书）均 0 错误。加入右键菜单、目录栏默认展开、状态栏「目录」开关与「目录不自动收起」之后用 `packaging/build.sh` 的冒烟测试复测：三种方式仍 0 错误，启动到首屏日志 0.32 s（文件夹）/ 1.00 s（单文件），首屏就绪 108 ms / 102 ms —— 此前记录的 86–92 ms 是目录栏默认收起时的版本，ADR-015 让开书时多出一次重排，代价即在此处可见（NFR-001 仍余量充足）。**注**：该次复测在分页原型期，日志行为 `first page ready`；ADR-016 之后同一处日志已改为 `first window ready`（首屏窗口就绪），时间量不变 |
-| 回归 | 单元 + 集成测试 **156 项全绿**（0.95 s + 11.85 s；当时的分页原型期数量，ADR-016 后为 171 项 / 0.92 s + 33.05 s，见 §12.7） |
+| 回归 | 单元 + 集成测试 **156 项全绿**（0.95 s + 11.85 s；当时的分页原型期数量；ADR-016 之后为 171 项 / 0.92 s + 33.05 s，本轮为 227 项 / 0.95 s + 35.59 s，见 §12.7） |
 
 **剪裁为什么用「可达性」而不是手写清单。** `Qt/plugins/**` 与 `Qt/qml/**` 都是运行时按路径 / `dlopen` 加载的，没有任何 `DT_NEEDED` 指向它们，因此无法用依赖图自动发现，只能显式列在 `PLUGIN_FAMILIES` / `PLUGIN_FILES` / `QML_MODULES` 三张表里。反过来，这份「剔除」一旦生效，**只被它们引用的共享库就变成了孤儿**（典型例子：`libqgtk3.so` 一个插件拖进整个 GTK 栈，以及被 GTK 链顺带拖进来的系统 `libicudata.so.78`——与 venv 自带的 `.73` 重复）。因此第二层用可达性遍历：以 `Qt/plugins/**`、`Qt/qml/**`、`PySide6/*.abi3.so`、`lib-dynload/**` 为根，沿 `DT_NEEDED` 求闭包，只在 `PySide6/Qt/lib/` 与 `_internal/` 顶层两个目录里剪除不可达的库。剪裁范围刻意收窄，是因为插件 / QML 模块 / Python 扩展都不在依赖图里，全量剪除会把它们删光。
 

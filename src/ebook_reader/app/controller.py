@@ -75,6 +75,32 @@ def _clean_label(text: str) -> str:
     return " ".join(text.replace(_WORD_JOINER, "").split())
 
 
+def _wheel_distance(angle_y: float, pixel_y: float, wheel_step: float) -> float:
+    """Turn one wheel event into a scroll distance in pixels (FR-063 / FR-073).
+
+    Positive moves the text down, which is the sign :meth:`ReaderController.scrollBy`
+    expects.  An event arrives in one of two shapes, and the two do *not* share a sign
+    convention, so reading either one alone is wrong for the other:
+
+    * ``angleDelta`` counts eighths of a degree and is positive when the wheel turns
+      *away* from the user - so scrolling down is negative.  A notch is 120 units, and
+      a notch is ``wheel_step`` (three lines).
+    * ``pixelDelta`` is a distance on screen, which Qt documents as "used directly to
+      scroll content": positive when scrolling down.  A smooth source - a touchpad, or
+      a high-resolution or free-spinning wheel - sends *only* this, with an angle of
+      zero, which is where the reader used to scroll by nothing at all.
+
+    ``angleDelta`` wins whenever it is present, because Qt documents ``pixelDelta`` as
+    driver-specific and unreliable on X11, and an event that carries both is a wheel
+    notch that happens to have been given a distance too.
+    """
+    if angle_y:
+        return -float(angle_y) / 120.0 * wheel_step
+    if pixel_y:
+        return float(pixel_y)
+    return 0.0
+
+
 def _build_outline(section: LaidOutSection) -> list[dict[str, object]]:
     """Rows describing the inside of one laid-out section (FR-018).
 
@@ -135,6 +161,9 @@ class ReaderController(QObject):
         self._view_size = QSizeF(900.0, 1300.0)
         self._device_ratio = 1.0
         self._toc_flat: list[tuple[TocEntry, int]] = []
+        #: The row the panel last highlighted, so that scrolling inside one document
+        #: only signals a change when it actually crosses a row (FR-013).
+        self._toc_row = -1
         self._toc_visible = False
         self._settings_visible = False
         self._outline_visible = False
@@ -267,8 +296,22 @@ class ReaderController(QObject):
 
     atSectionEnd = Property(bool, _get_at_section_end, notify=viewChanged)
 
+    def _adjacent_section(self, delta: int) -> int:
+        """The section a page-turn lands on, or ``-1`` when nothing is left (FR-016).
+
+        A ``linear="no"`` document is in the spine but not in the text - a cover, an
+        imprint page, an advertisement - and the book says so.  The walk therefore
+        belongs to the domain layer (``EpubBook.next_section`` / ``previous_section``)
+        rather than to a ``±1`` written here: it is the book's own statement, and a
+        reader that pages into a cover has already disagreed with the publisher.
+        """
+        if self._book is None:
+            return -1
+        step = self._book.next_section if delta > 0 else self._book.previous_section
+        return step(self._section_index)
+
     def _get_has_next_section(self) -> bool:
-        return self._book is not None and self._section_index + 1 < self._book.section_count
+        return self._adjacent_section(1) >= 0
 
     hasNextSection = Property(bool, _get_has_next_section, notify=viewChanged)
 
@@ -279,9 +322,8 @@ class ReaderController(QObject):
         for them takes away the moment where they decide to stop.  Empty when
         nothing follows this section, or when no contents entry names it.
         """
-        if not self.hasNextSection or self._book is None:
-            return ""
-        return self._section_title_at(self._section_index + 1)
+        target = self._adjacent_section(1)
+        return self._section_title_at(target) if target >= 0 else ""
 
     nextSectionTitle = Property(str, _get_next_section_title, notify=viewChanged)
 
@@ -482,13 +524,14 @@ class ReaderController(QObject):
     settingsVisible = Property(bool, _get_settings_visible, notify=layoutChanged)
 
     def _get_toc_items(self) -> list[dict[str, object]]:
+        current = self._get_current_toc_row()
         return [
             {
                 "title": entry.title,
                 "level": entry.level,
                 "section": section,
                 "row": row,
-                "current": section == self._section_index,
+                "current": row == current,
             }
             for row, (entry, section) in enumerate(self._toc_flat)
         ]
@@ -496,12 +539,39 @@ class ReaderController(QObject):
     tocItems = Property(list, _get_toc_items, notify=tocChanged)
 
     def _get_current_toc_row(self) -> int:
-        for row, (_, section) in enumerate(self._toc_flat):
-            if section == self._section_index:
-                return row
-        return -1
+        return self._toc_row_at(self._section_index, self._scroll_offset)
 
     currentTocRow = Property(int, _get_current_toc_row, notify=tocChanged)
+
+    def _toc_row_at(self, section_index: int, offset: float) -> int:
+        """The contents row the reader is at, or ``-1`` when the place has no row.
+
+        A row is the reader's place when it points at an earlier document, or at the
+        current one and no further in than where the reader is.  Comparing documents
+        alone was enough while a document could hold only one row; the moment two rows
+        share a file - which is what an anchor is for - that rule highlights the row
+        *above* the one the reader is in, and the lower row can never be marked at all.
+
+        Only rows of the current document ask for a layout, and that layout is the one
+        already on screen, so this costs nothing to ask.
+        """
+        row_at = -1
+        for row, (entry, target) in enumerate(self._toc_flat):
+            if target > section_index:
+                break
+            if target < section_index:
+                row_at = row
+            elif self._toc_target_offset(entry, target) <= offset + _OFFSET_EPSILON:
+                row_at = row
+        return row_at
+
+    def _toc_target_offset(self, entry: TocEntry, section_index: int) -> float:
+        """Where inside its document a contents row lands, in pixels from its top."""
+        if self._engine is None or not entry.fragment:
+            return 0.0
+        section = self._engine.section(section_index)
+        block = section.anchor_block(entry.fragment)
+        return 0.0 if block is None else section.block_offset(block)
 
     # ----------------------------------------------------------------- outline
 
@@ -618,6 +688,7 @@ class ReaderController(QObject):
         self._window_cache.clear()
         self._scroll_offset = 0.0
         self._toc_flat = []
+        self._toc_row = -1
         # Columns belong to the book that was open, so they go with it.  The
         # settings drawer is book-independent and stays where the reader left it.
         self._toc_visible = False
@@ -697,6 +768,24 @@ class ReaderController(QObject):
         """Move the window to *fraction* of the scrollable distance (the scroll bar)."""
         self._set_offset(max(0.0, min(1.0, float(fraction))) * self.scrollMax)
 
+    @Slot(float, float)
+    def wheelScroll(self, angle_y: float, pixel_y: float) -> None:
+        """Scroll by one wheel event, whatever shape the platform sent (FR-063).
+
+        The arithmetic lives here rather than in QML, because the wheel, the keys and
+        the menu have to move by the same units (FR-073), and because a test can drive
+        this without a window.  QML forwards both deltas and nothing else; which of
+        them counts is decided by :func:`_wheel_distance`.
+
+        A phase event - the begin or end of a smooth gesture, where both deltas are
+        zero - moves nothing and is ignored rather than repainting the window.
+        """
+        distance = _wheel_distance(angle_y, pixel_y, self.wheelStep)
+        if not distance:
+            return
+        _log.debug("wheel angle=%.1f pixel=%.1f -> %.1f px", angle_y, pixel_y, distance)
+        self.scrollBy(distance)
+
     def _set_offset(self, offset: float) -> None:
         """Move the window to *offset*, clamped to the section.
 
@@ -721,14 +810,15 @@ class ReaderController(QObject):
     @Slot()
     def goToNextSection(self) -> None:
         """Follow the "next chapter" line the window shows at the end (FR-074)."""
-        if self.hasNextSection:
-            self.goToSection(self._section_index + 1)
+        target = self._adjacent_section(1)
+        if target >= 0:
+            self.goToSection(target)
 
     def _step_section(self, delta: int) -> None:
         if self._engine is None or self._book is None:
             return
-        target = self._section_index + delta
-        if not 0 <= target < self._book.section_count:
+        target = self._adjacent_section(delta)
+        if target < 0:
             return
         self._save_state()
         self._section_index = target
@@ -781,10 +871,15 @@ class ReaderController(QObject):
         if not 0 <= row < len(self._toc_flat):
             return
         entry, section = self._toc_flat[row]
-        fragment = entry.href.partition("#")[2] if "#" in entry.href else ""
+        # The anchor travels on the entry rather than being parsed back out of the href
+        # (FR-014).  Publishers put the *only* pointer to the place a row leads in the
+        # fragment, and a row that quietly becomes "top of that file" is a row that
+        # disagrees with the book; keeping the two apart is also what lets the href be
+        # resolved against the spine while the anchor is resolved against the text.
+        #
         # No signal of its own: `goToSection` republishes the window, which emits
         # `tocChanged` too - the highlight of the current row is what has to move.
-        self.goToSection(section, fragment)
+        self.goToSection(section, entry.fragment)
 
     @Slot(int)
     def goToOutlineRow(self, row: int) -> None:
@@ -1073,7 +1168,13 @@ class ReaderController(QObject):
             self._last_section_ms = stats.build_ms if stats else 0.0
             self._engine.prefetch(self._section_index, self._scroll_offset)
         self.viewChanged.emit()
-        if set_section:
+        # Which row the panel highlights is a property of the place, not of the
+        # document - a document can hold several rows (FR-013).  Signalled only when it
+        # changes: scrolling inside one chapter would otherwise rebuild the panel's rows
+        # on every wheel notch.
+        row = self._get_current_toc_row()
+        if set_section or row != self._toc_row:
+            self._toc_row = row
             self.tocChanged.emit()
         self._save_state()
 

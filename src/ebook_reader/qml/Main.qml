@@ -160,14 +160,18 @@ ApplicationWindow {
             // a long web page answers to.  There is no click-to-turn-page any more:
             // with a continuous column, half-screens and page-sized jumps are
             // guesses at a unit that no longer exists (FR-073).
+            //
+            // Both deltas are forwarded, not just the angle.  A mouse notch arrives as
+            // 120 units of angle, but a touchpad and a high-resolution or free-spinning
+            // wheel arrive as screen pixels with no angle at all - and reading only the
+            // angle left those gestures scrolling by exactly nothing.  Which delta
+            // counts, and how far it moves, is the controller's decision, so that the
+            // wheel, the keys and the menu move by the same units (FR-063 / FR-073).
             WheelHandler {
                 target: null
                 onWheel: function (event) {
                     if (!ctl) { return }
-                    // One notch is 120 units and three lines is what every desktop
-                    // browser makes of it; a smooth trackpad sends smaller deltas
-                    // and gets proportionally smaller moves.
-                    ctl.scrollBy(-event.angleDelta.y / 120.0 * ctl.wheelStep)
+                    ctl.wheelScroll(event.angleDelta.y, event.pixelDelta.y)
                     event.accepted = true
                 }
             }

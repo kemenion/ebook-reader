@@ -213,6 +213,39 @@ def test_the_navigation_keys_do_nothing_without_a_book(shell) -> None:
         press(window, key)
     assert (controller.sectionIndex, controller.scrollOffset) == (0, 0.0)
 
+
+def test_the_chapter_keys_follow_the_books_own_linear_rule(shell, build_epub) -> None:
+    """A ``linear="no"`` document is in the spine but not in the text (FR-016).
+
+    The rule is the *book's* statement, so it is read in the domain layer - but a rule
+    nothing asks for is a rule that does not exist: `]`, `[`, the menu's rows and the
+    strip at the end of a chapter all have to walk the same way.  No reference book
+    marks a document this way, so the book is written here.
+    """
+    _, window, controller = shell
+    path = build_epub(
+        {
+            "text/ch1.xhtml": "<html><body><h1>第一章</h1><p>正文</p></body></html>",
+            "text/ad.xhtml": "<html><body><p>广告</p></body></html>",
+            "text/ch2.xhtml": "<html><body><h1>第二章</h1><p>正文</p></body></html>",
+        },
+        linear_no=["text/ad.xhtml"],
+    )
+    assert controller.openBook(str(path))
+    controller.goToSection(0)
+    pump(240)
+
+    assert controller.sectionCount == 3  # still readable, still indexed
+    assert controller.hasNextSection
+
+    press(window, "]")
+    assert controller.sectionIndex == 2, "the advertisement is not part of the text"
+    assert not controller.hasNextSection, "nothing linear follows the last chapter"
+
+    press(window, "[")
+    assert controller.sectionIndex == 0, "the advertisement is not part of the text"
+
+
 # --------------------------------------------------------------------- the panels
 
 
@@ -295,6 +328,39 @@ def test_the_wheel_scrolls_the_text_by_the_wheel_step(shell, kangpo_path: Path) 
     assert controller.scrollOffset == 0.0
 
 
+def test_a_smooth_wheel_scrolls_by_its_own_pixels(shell, kangpo_path: Path) -> None:
+    """The regression: a pixel-only event used to move the text by nothing (FR-063).
+
+    A touchpad, a high-resolution wheel and a free-spinning wheel report a distance on
+    screen and no angle at all.  Reading only ``angleDelta`` turned those gestures into
+    a mouse that looks broken: the event arrived, was accepted, and the page stayed
+    exactly where it was - and this is the shape the reader's own hardware sends.
+    """
+    _, window, controller = shell
+    _open_long_section(controller, kangpo_path)
+    page = item(window, "pageArea")
+    position = at(page, page.width() / 2, 400)
+
+    wheel(window, position, notches=0, pixels=60)
+    # Exactly the distance asked for, not twice it: the page took the event and no
+    # other handler did.  (The accept flag itself is not readable from here - Qt gives
+    # the QML handler its own event object - so the count is what says so.)
+    assert controller.scrollOffset == pytest.approx(60.0, abs=TOLERANCE)
+
+    wheel(window, position, notches=0, pixels=-60)      # and it comes back up
+    assert controller.scrollOffset == pytest.approx(0.0, abs=TOLERANCE)
+
+
+def test_a_partial_notch_scrolls_by_its_own_fraction(shell, kangpo_path: Path) -> None:
+    """A high-resolution wheel stops between detents; the text follows it (FR-063)."""
+    _, window, controller = shell
+    _open_long_section(controller, kangpo_path)
+    page = item(window, "pageArea")
+
+    wheel(window, at(page, page.width() / 2, 400), notches=0.5)
+    assert controller.scrollOffset == pytest.approx(controller.wheelStep / 2, abs=TOLERANCE)
+
+
 def test_a_click_on_the_text_does_not_move_it(shell, kangpo_path: Path) -> None:
     """The click zones are gone with the pages; a click on the text is not a turn."""
     _, window, controller = shell
@@ -326,9 +392,11 @@ def test_the_wheel_over_a_panel_leaves_the_text_alone(
 
     for name in ("tocPanel", "outlinePanel"):
         panel = item(window, name)
-        before = controller.scrollOffset
-        wheel(window, at(panel, panel.width() / 2, 400))
-        assert controller.scrollOffset == before, name
+        at_panel = at(panel, panel.width() / 2, 400)
+        for shape in ({}, {"notches": 0, "pixels": 60}):    # a notch, and a touchpad
+            before = controller.scrollOffset
+            wheel(window, at_panel, **shape)
+            assert controller.scrollOffset == before, (name, shape)
 
 
 def test_a_scroll_inside_one_quantum_reuses_the_bitmap(

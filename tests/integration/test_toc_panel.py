@@ -165,6 +165,43 @@ def test_clicking_a_chapter_leaves_the_map_on_screen(
     assert warnings == []
 
 
+def test_a_row_that_names_an_anchor_lands_on_it(
+    shell, binan_path: Path, warnings
+) -> None:
+    """Two rows may share a document and still lead to different places (FR-014).
+
+    币安's contents points 幣安上線 (row 5) and 早年歲月 (row 6) at the same file, the
+    second at an anchor well inside it.  The anchor was dropped on both parsing paths,
+    so the second row landed on the top of the file - exactly where the first one had
+    just been - and the panel marked the first row as the reader's place even after
+    they had asked for the second.
+    """
+    _, window, controller = shell
+    assert controller.openBook(str(binan_path))
+    pump(RESIZE_DEBOUNCE_MS + 100)
+
+    listing = item(window, "tocList")
+    rows = _rows(listing)
+    assert len(rows) > 6
+
+    click(window, centre(rows[5]))                      # the first row of the file
+    pump(RESIZE_DEBOUNCE_MS + 100)
+    section = controller.sectionIndex
+    assert controller.scrollOffset == 0.0               # a row with no anchor starts here
+    assert controller.currentTocRow == 5
+
+    # Read again: the jump rebuilt the rows, and the old delegates went with it.
+    rows = _rows(listing)
+    click(window, centre(rows[6]))                      # the anchored row, same file
+    pump(RESIZE_DEBOUNCE_MS + 100)
+
+    assert controller.sectionIndex == section            # same document ...
+    assert controller.scrollOffset > 0.0                 # ... and inside it, not at its top
+    assert controller._anchor_block() > 0
+    assert controller.currentTocRow == 6                 # and the panel says so
+    assert warnings == []
+
+
 def test_only_closing_it_on_purpose_takes_the_panel_away(
     controller, kangpo_path: Path
 ) -> None:

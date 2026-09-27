@@ -142,10 +142,17 @@ def press(window, name: str) -> None:
     pump(120)
 
 
-def wheel(window, position: tuple[int, int], notches: int = 1) -> None:
-    """One wheel notch at *position*; positive notches scroll down (FR-073).
+def wheel(window, position: tuple[int, int], notches: float = 1, pixels: int = 0) -> None:
+    """One wheel event at *position*; positive notches scroll down (FR-063).
 
-    One notch is 120 units, which is what a mouse sends and what Main.qml divides by.
+    A mouse sends one notch - 120 units of angle - which is what ``notches`` builds,
+    and a half or quarter notch is what a high-resolution wheel sends, so it is not
+    required to be whole.  A touchpad, a high-resolution wheel or a free-spinning
+    wheel in a smooth-scrolling session sends screen pixels with no angle at all,
+    which is what ``pixels`` builds - and it is the shape that used to scroll by
+    nothing.  The two are separate arguments because the controller deliberately
+    treats them differently; a test wanting both can pass both.
+
     Sent to the window rather than to an item, so the same hit-testing decides where
     it lands as for a reader's own wheel.
     """
@@ -155,8 +162,8 @@ def wheel(window, position: tuple[int, int], notches: int = 1) -> None:
     event = QWheelEvent(
         point,
         point,
-        QPoint(0, 0),
-        QPoint(0, -120 * notches),
+        QPoint(0, int(round(pixels))),
+        QPoint(0, int(round(-120 * notches))),
         Qt.NoButton,
         Qt.NoModifier,
         Qt.ScrollUpdate,
@@ -164,6 +171,7 @@ def wheel(window, position: tuple[int, int], notches: int = 1) -> None:
     )
     QGuiApplication.sendEvent(window, event)
     pump(120)
+    return event
 
 
 def shortcut_sequences(window) -> list[str]:

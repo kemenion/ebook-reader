@@ -27,7 +27,10 @@ def find_package_path(read_entry) -> str:
 
     try:
         root = ET.fromstring(raw)
-    except ET.ParseError as exc:
+    except (ET.ParseError, ValueError) as exc:
+        # ``ValueError`` is a declared encoding expat does not implement.  This document
+        # holds nothing but paths, so there is nothing to decode it for; what matters is
+        # that the failure arrives as a readable error rather than a traceback (FR-008).
         raise NotAnEpubError(f"{CONTAINER_PATH} is not valid XML: {exc}") from exc
 
     rootfile = root.find(f".//{{{_CONTAINER_NS}}}rootfile")
