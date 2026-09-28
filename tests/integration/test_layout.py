@@ -15,7 +15,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from conftest import RESIZE_DEBOUNCE_MS, at, click, item, on_screen, pump, visible
+from PySide6.QtGui import QWindow
+
+from conftest import (
+    RESIZE_DEBOUNCE_MS,
+    at,
+    click,
+    item,
+    on_screen,
+    pump,
+    set_window_size,
+    visible,
+)
 
 
 def _column(window) -> tuple[float, float]:
@@ -36,10 +47,39 @@ def test_the_window_opens_wide_enough_for_three_columns(shell, warnings) -> None
     assert warnings == []
 
 
+def test_opening_a_book_takes_the_window_to_full_size(shell, kangpo_path: Path) -> None:
+    """A reader who asked for a book asked for a page: the page gets the display (FR-077).
+
+    Every book, not only the first one - picking another one from the menu is the same
+    request - and the empty shell keeps the size it was built with, so the window is
+    still usable for a file dialog on a small display.
+    """
+    _, window, controller = shell
+    assert window.visibility() == QWindow.Visibility.Windowed
+    assert window.property("width") == 1400
+
+    assert controller.openBook(str(kangpo_path))
+    pump(2 * RESIZE_DEBOUNCE_MS)
+    assert window.visibility() == QWindow.Visibility.Maximized
+
+    # The page box follows the window, so nothing has to be resized by hand for the
+    # text to use the room it was just given.
+    assert controller._view_size.width() == window.property("pageColumnWidth")
+    assert window.property("pageColumnWidth") == (
+        window.property("width") - window.property("sidePanelWidth")
+    )
+
+
 def test_the_columns_tile_the_window(
     shell, kangpo_path: Path, heading_section: int
 ) -> None:
-    """No overlap and no gap: the page gets what the panels do not take."""
+    """No overlap and no gap: the page gets what the panels do not take.
+
+    The width is read off the window instead of assumed: opening a book maximizes it
+    (FR-077), so how much room there is depends on the display, and the panel width is
+    derived from it (ADR-014 ②).  The arithmetic is the same at any size, which is
+    what this test exists to say.
+    """
     _, window, controller = shell
     assert controller.openBook(str(kangpo_path))
     # The outline column only takes space where the section has something to list
@@ -62,6 +102,10 @@ def test_the_columns_tile_the_window(
     pump(2 * RESIZE_DEBOUNCE_MS)
     outline = item(window, "outlinePanel")
     assert visible(window, "outlinePanel")
+    # Read again, not carried over: two columns share what one column took, and on a
+    # window too narrow for two full panels the room comes out of the panels rather
+    # than out of the text (ADR-014 ②).
+    panel = window.property("sidePanelWidth")
     start, width = _column(window)
     assert (start, width) == (panel, full - 2 * panel)
     assert (outline.x(), outline.width()) == (start + width, panel)
@@ -70,7 +114,7 @@ def test_the_columns_tile_the_window(
     # Closing it again hands the width back to the page.
     controller.toggleToc()
     assert not visible(window, "tocPanel")
-    assert _column(window) == (0.0, full - panel)
+    assert _column(window) == (0.0, full - window.property("sidePanelWidth"))
 
 
 def test_the_page_is_set_for_the_column_not_the_window(
@@ -179,8 +223,7 @@ def test_a_narrow_window_keeps_both_columns_usable(
     controller.toggleOutline()
     pump(2 * RESIZE_DEBOUNCE_MS)
 
-    window.setProperty("width", 720)
-    pump(2 * RESIZE_DEBOUNCE_MS)
+    set_window_size(window, 720)
 
     panel = window.property("sidePanelWidth")
     start, width = _column(window)
@@ -245,6 +288,10 @@ def test_only_settings_shields_the_page_from_clicks(
     controller.goToSection(heading_section)
     controller.toggleOutline()
     pump(2 * RESIZE_DEBOUNCE_MS)
+    # Back to the documented default size: the drawer is a fixed-width panel beside
+    # the text, and "beside it" has to be a place on the page - on a display smaller
+    # than the drawer plus a column, the middle of the text *is* the drawer.
+    set_window_size(window)
     assert controller.tocVisible and controller.outlineVisible
 
     # Both columns stand, and neither of them is a shield: a click in the middle of

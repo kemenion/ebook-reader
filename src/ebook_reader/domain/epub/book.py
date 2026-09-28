@@ -54,6 +54,15 @@ _LABEL_BAD_ENDING = "。！？；：，、,.;:!?"
 #: the middle is a sentence that happens to be short.
 _LABEL_INNER_PROSE = ("。", "！", "？", "；")
 
+#: How much of a document is read to decide whether it carries any text at all.
+#:
+#: A frontispiece - the page a chapter opens on, which holds one picture and nothing
+#: else - is a few hundred bytes long, because the picture itself is a separate
+#: archive entry.  A document longer than this window is taken to carry text in it and
+#: is then left alone: what this answers is only whether a contents row is looking at a
+#: page with nothing to read (FR-016 / ADR-021), never whether a page is readable.
+_SILENT_DOCUMENT_BYTES = 4096
+
 #: Deepest contents level the panel can show.  A row is indented 16 px per level
 #: (``TocSidebar.qml``: ``leftPadding: 16 + rowLevel * 16``) inside a contents column that
 #: is at most 320 px wide (``Main.qml``), so a row nested deeper than this would have
@@ -91,6 +100,13 @@ def _label_of(block: Block) -> str:
     return text
 
 
+def _walk_rows(rows: tuple[TocEntry, ...]) -> Iterator[TocEntry]:
+    """Every row of a navigation tree, a parent before its children."""
+    for row in rows:
+        yield row
+        yield from _walk_rows(row.children)
+
+
 class EpubBook:
     """An opened EPUB archive with lazily parsed content."""
 
@@ -102,6 +118,10 @@ class EpubBook:
         self._landmarks: tuple[Landmark, ...] | None = None
         self._name_lookup: dict[str, str] | None = None
         self._block_cache: dict[int, tuple[Block, ...]] = {}
+        self._document_cache: dict[int, tuple[Block, ...]] = {}
+        self._spans: tuple[tuple[int, ...], ...] | None = None
+        self._section_of_spine: dict[int, int] = {}
+        self._own_rows: tuple[TocEntry, ...] | None = None
         self._probe_cache: dict[str, tuple[int, int] | None] = {}
 
     # ----------------------------------------------------------------- opening
@@ -164,7 +184,7 @@ class EpubBook:
 
     @property
     def section_count(self) -> int:
-        return len(self.spine)
+        return len(self._reading_sections())
 
     def _read_or_key_error(self, name: str) -> bytes:
         archive = self._ensure_open()
@@ -204,13 +224,117 @@ class EpubBook:
 
     # ---------------------------------------------------------------- sections
 
+    def section_documents(self, index: int) -> tuple[int, ...]:
+        """Spine indexes behind one reading section, in reading order (FR-016).
+
+        One document per section, except where the contents points at a page with
+        nothing to read: that page is the chapter's frontispiece, and the material
+        which follows it - as long as it says no name of its own - belongs to the same
+        section, so that clicking the row leads to the chapter and not just to its
+        title picture (ADR-021).
+        """
+        return self._reading_sections()[index]
+
+    def _reading_sections(self) -> tuple[tuple[int, ...], ...]:
+        """The reading order, split into sections; built once (FR-016)."""
+        if self._spans is None:
+            self._spans = self._split_spine()
+            self._section_of_spine = {
+                spine_index: section
+                for section, span in enumerate(self._spans)
+                for spine_index in span
+            }
+        return self._spans
+
+    def _split_spine(self) -> tuple[tuple[int, ...], ...]:
+        """Where one section ends and the next begins (FR-016 / ADR-021).
+
+        The spine is one document per section, and that is what ``]`` walks.  The
+        exception is a contents row that points at a document with nothing to read
+        (:meth:`_says_nothing`): the row is the book's own statement that a part
+        begins there, so the documents after it - while they are neither named by the
+        contents nor able to name themselves - are part of that part rather than
+        sections of their own.  A converted book that writes every chapter as a
+        frontispiece plus its text is the shape this is for: without it the row lands
+        on the picture, and the chapter itself is a section the contents never
+        mentions, reachable only by paging into it.
+
+        Only documents that would get no row of their own are absorbed - the ones
+        :meth:`_fill_unnamed` has nothing to say about - so merging them cannot add,
+        move or drop a row: the panel lists exactly what it listed before, and every
+        row it lists now leads to something to read.
+        """
+        targets = {
+            index
+            for row in _walk_rows(self._book_rows())
+            if (index := self._spine_index_of_href(row.href)) >= 0
+        }
+        spans: list[tuple[int, ...]] = []
+        at = 0
+        while at < len(self.spine):
+            end = at + 1
+            if at in targets and self._says_nothing(at):
+                while end < len(self.spine) and self._is_absorbed(end, targets):
+                    end += 1
+            spans.append(tuple(range(at, end)))
+            at = end
+        return tuple(spans)
+
+    def _is_absorbed(self, spine_index: int, targets: set[int]) -> bool:
+        """Whether one document joins the section the row above it opened (FR-016).
+
+        Three things have to hold, and together they are exactly「这一节没有自己的
+        行」: it is in the reading order (a ``linear="no"`` document was taken out of
+        the text by the publisher, FR-016), the contents does not name it, and it
+        names nothing itself - not even its own first line.
+        """
+        return (
+            spine_index not in targets
+            and self.spine[spine_index].linear
+            and not self._document_name(spine_index)[0]
+        )
+
+    def _says_nothing(self, spine_index: int) -> bool:
+        """Whether one document holds no text at all: a page that is only a picture.
+
+        Decided from a bounded head (:data:`_SILENT_DOCUMENT_BYTES`), which is exact
+        whenever the document fits inside that window - the case the rule exists for,
+        because a frontispiece is one ``<img>`` and nothing else.  A longer document is
+        taken to carry text and left alone, so a chapter that opens with a full-page
+        picture and then continues in words is not mistaken for a frontispiece on the
+        strength of its first kilobytes.
+        """
+        head = self._read_head(self.spine[spine_index].href, _SILENT_DOCUMENT_BYTES)
+        if len(head) >= _SILENT_DOCUMENT_BYTES:
+            return False
+        blocks = self._sanitize(head, self._document_base_dir(spine_index))
+        return not any(block.text.strip() for block in blocks)
+
+    def _section_of(self, spine_index: int) -> int:
+        """Index of the reading section a spine document belongs to."""
+        self._reading_sections()
+        return self._section_of_spine[spine_index]
+
+    def _in_reading_order(self, index: int) -> bool:
+        """Whether a section belongs to the text the reader walks, not to a cover.
+
+        The flag is per document (FR-016); a section answers for the documents it is
+        made of, and one of them being part of the text is enough - a frontispiece the
+        publisher marked ``linear="no"`` does not take the chapter with it.
+        """
+        return any(self.spine[spine_index].linear for spine_index in self.section_documents(index))
+
     def section_bytes(self, index: int) -> bytes:
-        """Raw XHTML bytes of one spine document."""
-        return self.resource(self.spine[index].href)
+        """Raw XHTML bytes of the document that opens one section (FR-016)."""
+        return self.resource(self.spine[self.section_documents(index)[0]].href)
 
     def section_base_dir(self, index: int) -> str:
         """Directory that relative hrefs inside a section resolve against."""
-        return _base_dir_of(self.spine[index].href)
+        return self._document_base_dir(self.section_documents(index)[0])
+
+    def _document_base_dir(self, spine_index: int) -> str:
+        """Directory that relative hrefs inside one spine document resolve against."""
+        return _base_dir_of(self.spine[spine_index].href)
 
     def resolve_in_section(self, index: int, href: str) -> str:
         return join_href(self.section_base_dir(index), href)
@@ -257,15 +381,33 @@ class EpubBook:
     # ----------------------------------------------------------------- content
 
     def blocks(self, index: int) -> tuple[Block, ...]:
-        """Normalised block list of one section, parsed once and cached."""
+        """Normalised block list of one section, parsed once and cached.
+
+        A section that absorbed the material below its frontispiece reads as one list
+        of blocks, which is what makes it one column on screen (ADR-016 / ADR-021):
+        images already carry the archive path they resolve to, so the blocks of two
+        documents behind different directories concatenate without a second pass.
+        """
         cached = self._block_cache.get(index)
         if cached is None:
-            cached = self._parse_blocks(index)
+            cached = tuple(
+                block
+                for spine_index in self.section_documents(index)
+                for block in self._document_blocks(spine_index)
+            )
             self._block_cache[index] = cached
         return cached
 
-    def _parse_blocks(self, index: int) -> tuple[Block, ...]:
-        return self._sanitize(self.section_bytes(index), self.section_base_dir(index))
+    def _document_blocks(self, spine_index: int) -> tuple[Block, ...]:
+        """Normalised block list of one spine document, parsed once and cached."""
+        cached = self._document_cache.get(spine_index)
+        if cached is None:
+            cached = self._sanitize(
+                self.resource(self.spine[spine_index].href),
+                self._document_base_dir(spine_index),
+            )
+            self._document_cache[spine_index] = cached
+        return cached
 
     def _sanitize(self, raw: bytes, base_dir: str) -> tuple[Block, ...]:
         # Imported lazily so that merely opening a book does not pay for it.
@@ -275,6 +417,7 @@ class EpubBook:
 
     def drop_blocks_cache(self) -> None:
         self._block_cache.clear()
+        self._document_cache.clear()
 
     def iter_blocks(self) -> Iterator[tuple[int, tuple[Block, ...]]]:
         for index in range(self.section_count):
@@ -305,15 +448,35 @@ class EpubBook:
         Such a tree is re-read from the text (:meth:`_nested_by_headings`) before the
         unnamed sections are filled in, so that the added rows land in the hierarchy
         too.
+
+        The rows are resolved against the **reading sections** rather than against the
+        spine, so a row whose target is a frontispiece points at the section that holds
+        the frontispiece *and* the chapter below it (ADR-021).
         """
-        package = self.package
-        for href, parser in ((package.nav_href, toc.parse_nav), (package.ncx_href, toc.parse_ncx)):
-            if not href or not self.has_resource(href):
-                continue
-            entries = parser(self.resource(href), _base_dir_of(href))
-            if entries:
-                return self._fill_unnamed(self._nested_by_headings(entries))
-        return self._fill_unnamed(())
+        return self._fill_unnamed(self._nested_by_headings(self._book_rows()))
+
+    def _book_rows(self) -> tuple[TocEntry, ...]:
+        """The rows the book wrote itself: EPUB 3 navigation first, NCX second (FR-010).
+
+        Read once and kept: both the reading sections (which documents a contents row
+        names, ADR-021) and the contents tree itself are built from them, and parsing a
+        navigation document twice for one book would be paying for the same bytes
+        twice.
+        """
+        if self._own_rows is None:
+            package = self.package
+            rows: tuple[TocEntry, ...] = ()
+            for href, parser in (
+                (package.nav_href, toc.parse_nav),
+                (package.ncx_href, toc.parse_ncx),
+            ):
+                if not href or not self.has_resource(href):
+                    continue
+                rows = parser(self.resource(href), _base_dir_of(href))
+                if rows:
+                    break
+            self._own_rows = rows
+        return self._own_rows
 
     @staticmethod
     def _is_flat(entries: tuple[TocEntry, ...]) -> bool:
@@ -427,7 +590,10 @@ class EpubBook:
         put them.
 
         A ``linear="no"`` document is skipped: it is not part of the order the reader
-        walks, which is also why 「下一章」steps over it (FR-016).
+        walks, which is also why 「下一章」steps over it (FR-016).  It is also why the
+        rows are built from the *sections* and not from the documents: a document that
+        a frontispiece absorbed has no row of its own to add (ADR-021), so the list the
+        panel shows is the same list it showed before that rule existed.
 
         ``entries`` is empty for a book with no navigation at all, and the result is
         then one row per nameable section - the fallback of FR-012, from the same rule
@@ -445,11 +611,12 @@ class EpubBook:
         note(entries)
         pending: list[tuple[int, TocEntry]] = []
         for index in range(self.section_count):
-            if index in named or not self.spine[index].linear:
+            if index in named or not self._in_reading_order(index):
                 continue
             title = self._section_label(index)
             if title:
-                pending.append((index, TocEntry(title=title, href=self.spine[index].href)))
+                opening = self.spine[self.section_documents(index)[0]].href
+                pending.append((index, TocEntry(title=title, href=opening)))
         if not pending:
             return entries
 
@@ -556,20 +723,43 @@ class EpubBook:
         that named the section is not a heading at all - a converter's ``<p>`` chapter
         title, or a section that says nothing.
 
-        It is one sniff rather than two because the two answers come from the same
-        block, and that block is already in hand: reading the head of a section is the
-        whole cost of naming it (36-45 ms for the omnibus's 135 sections), and the
-        level is what a contents that declares no hierarchy is read from
-        (:meth:`_nested_by_headings`).
+        A section says its name with the first thing it says, so a section that opens
+        on a frontispiece is named by the first words of the chapter below it
+        (:meth:`_document_name` is asked document by document, in reading order,
+        ADR-021).  It is one sniff per document rather than two because the two answers
+        come from the same block, and that block is already in hand: reading the head
+        of a document is the whole cost of naming what it contains (36-45 ms for the
+        omnibus's 135 sections), and the level is what a contents that declares no
+        hierarchy is read from (:meth:`_nested_by_headings`).
         """
-        head = self._read_head(self.spine[index].href, _LABEL_SNIFF_BYTES)
+        for spine_index in self.section_documents(index):
+            name, level = self._document_name(spine_index)
+            if name:
+                return name, level
+        return "", 0
+
+    def _document_name(self, spine_index: int) -> tuple[str, int]:
+        """What one document says its name is, and the heading level it wrote it at.
+
+        The name is read from the head of that one document
+        (:data:`_LABEL_SNIFF_BYTES`), which is where a name lives.  The one case that
+        pays for a whole parse is a head that ran out on the very block that would name
+        it - that block may have been cut in half by the reading window - and the
+        document is then read in full, which is the parse the reader is about to need
+        anyway: it is where they are being led.
+
+        An empty name means the document names nothing, which is the answer both a
+        chapter written as plain prose and a page that is only a picture give (FR-012
+        / ADR-021).
+        """
+        head = self._read_head(self.spine[spine_index].href, _LABEL_SNIFF_BYTES)
         if len(head) < _LABEL_SNIFF_BYTES:
-            return self._first_name(self.blocks(index))
-        blocks = self._sanitize(head, self.section_base_dir(index))
+            return self._first_name(self._document_blocks(spine_index))
+        blocks = self._sanitize(head, self._document_base_dir(spine_index))
         position = next((at for at, block in enumerate(blocks) if block.text.strip()), -1)
         if 0 <= position < len(blocks) - 1:
             return self._name_of(blocks[position])
-        return self._first_name(self.blocks(index))
+        return self._first_name(self._document_blocks(spine_index))
 
     @classmethod
     def _first_name(cls, blocks: tuple[Block, ...]) -> tuple[str, int]:
@@ -585,12 +775,17 @@ class EpubBook:
         return _label_of(block), block.level if block.is_heading else 0
 
     def section_index_for_href(self, href: str, *, current: int = -1) -> int:
-        """Find the spine index that owns *href*, ignoring any fragment, or ``-1``.
+        """Find the reading section that owns *href*, ignoring any fragment, or ``-1``.
 
         The fragment is dropped rather than matched because it names a place *inside*
-        the document, and this method answers which document that is; whether the row
-        then lands at the top of it or at an anchor in it is a second question, asked of
-        the laid-out section once it exists (FR-014).
+        the document, and this method answers which section that document belongs to;
+        whether the row then lands at the top of it or at an anchor in it is a second
+        question, asked of the laid-out section once it exists (FR-014).
+
+        A document the contents names resolves to the section that holds it, and for a
+        frontispiece that section is also the chapter below it (ADR-021).  Callers care
+        about the section, not the document, because that is what they scroll and what
+        the panel draws.
 
         *current* answers the one href that names no document: ``#note3`` is a place in
         the document the link was written in, and a reader that knows which section it
@@ -600,9 +795,16 @@ class EpubBook:
         than not following it.
         """
         path, fragment = split_fragment(href)
-        target = normalize(path)
-        if not target:
+        if not normalize(path):
             return current if fragment and 0 <= current < self.section_count else -1
+        spine_index = self._spine_index_of_href(href)
+        return -1 if spine_index < 0 else self._section_of(spine_index)
+
+    def _spine_index_of_href(self, href: str) -> int:
+        """The spine document *href* names, ignoring any fragment, or ``-1``."""
+        target = normalize(split_fragment(href)[0])
+        if not target:
+            return -1
         for item in self.spine:
             if item.href == target:
                 return item.index
@@ -625,12 +827,12 @@ class EpubBook:
     def _step_section(self, index: int, delta: int) -> int:
         target = index + delta
         while 0 <= target < self.section_count:
-            if self.spine[target].linear:
+            if self._in_reading_order(target):
                 return target
             target += delta
         return -1
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        stored = self._package
-        return f"<EpubBook {self.path.name!r} sections={len(stored.spine) if stored else 0}>"
+        opened = self._package is not None
+        return f"<EpubBook {self.path.name!r} sections={self.section_count if opened else 0}>"
 

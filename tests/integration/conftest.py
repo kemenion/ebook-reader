@@ -123,6 +123,23 @@ def at(child: QQuickItem, x: float, y: float) -> tuple[int, int]:
     return int(point.x()), int(point.y())
 
 
+def set_window_size(window, width: int | None = None, height: int | None = None) -> None:
+    """Give the window a size a test can measure; the rest is left as it was.
+
+    Opening a book maximizes the window (FR-077), and a maximized window ignores the
+    ``width`` a test sets - so a test that is about a particular size has to leave
+    full size first.  Called with no size at all it restores the size ``Main.qml``
+    builds the shell with, which is what a test that wants "the documented default"
+    means.
+    """
+    window.showNormal()
+    if width is not None:
+        window.setProperty("width", width)
+    if height is not None:
+        window.setProperty("height", height)
+    pump(2 * RESIZE_DEBOUNCE_MS)
+
+
 def centre(child: QQuickItem) -> tuple[int, int]:
     """Where to click to hit *child*, in window coordinates."""
     return at(child, child.width() / 2, child.height() / 2)

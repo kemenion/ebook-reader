@@ -80,6 +80,17 @@ ApplicationWindow {
 
     onClosing: ctl.saveWindow(width, height)
 
+    // Opening a book takes the window to full size (FR-077).  A reader who has asked
+    // for a book has asked for a page, and a page wants the screen; the empty shell
+    // keeps the size it was built with, so that opening a book from the file dialog
+    // stays possible on a display smaller than that size.  It fires on every book, not
+    // only the first one - picking another book from the menu is the same request - and
+    // it leaves full screen alone: `F11` is the reader's own choice of how much chrome
+    // to keep, and opening a book is not the moment to overrule it.
+    onCHasBookChanged: {
+        if (cHasBook && window.visibility !== Window.FullScreen) { window.showMaximized() }
+    }
+
     function toggleFullScreen() {
         if (window.visibility === Window.FullScreen) { window.showNormal() }
         else { window.showFullScreen() }

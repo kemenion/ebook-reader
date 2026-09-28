@@ -12,6 +12,7 @@ import pytest
 
 from ebook_reader.domain import EpubBook
 from ebook_reader.domain.epub.paths import join_href, normalize, split_fragment
+from ebook_reader.domain.html.kinsoku import strip_word_joiners
 
 
 def test_opens_both_books(kangpo, binan) -> None:
@@ -297,4 +298,133 @@ def test_paging_the_reference_books_never_skips_a_section(kangpo, binan) -> None
         for index in range(book.section_count - 1):
             assert book.next_section(index) == index + 1
         assert book.previous_section(0) == -1
+
+
+# --------------------------------- the page a chapter opens on (FR-016 / ADR-021)
+
+#: Navigation for the frontispiece books below: two chapters, both named by the book,
+#: so that what a row leads to is decided by the reading order alone.
+CHAPTERS_NCX = """<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <navMap>
+    <navPoint id="n1"><navLabel><text>第一章 标题图</text></navLabel>
+      <content src="text/ch1.xhtml"/></navPoint>
+    <navPoint id="n2"><navLabel><text>第二章 收尾</text></navLabel>
+      <content src="text/ch2.xhtml"/></navPoint>
+  </navMap>
+</ncx>
+"""
+
+#: One row, pointing at a volume's cover: the shape the omnibus has.
+ONE_VOLUME_NCX = """<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <navMap>
+    <navPoint id="n1"><navLabel><text>第一卷</text></navLabel>
+      <content src="text/vol.xhtml"/></navPoint>
+  </navMap>
+</ncx>
+"""
+
+
+def _chapter_book(build_epub, documents, ncx: str = CHAPTERS_NCX, **kwargs):
+    """A book whose whole navigation is the NCX written here."""
+    return build_epub(
+        documents,
+        resources={"toc.ncx": ncx},
+        manifest={"toc.ncx": ("application/x-dtbncx+xml", "ncx")},
+        **kwargs,
+    )
+
+
+def test_a_row_that_points_at_a_title_page_carries_the_chapter(build_epub) -> None:
+    """A page that says nothing but a picture is the chapter's title page (ADR-021).
+
+    The shape is what a converted book has: the chapter is a title picture in a
+    document of its own, the text is the next document, and the contents points at
+    the picture.  Read as one document per section, the row led to a picture and the
+    chapter itself became a section the contents never names - reachable only by
+    paging into it, which is what 缺陷 27 was.
+    """
+    path = _chapter_book(
+        build_epub,
+        {
+            "text/ch1.xhtml": "<html><body><h1><img src='title.png'/></h1></body></html>",
+            "text/ch1txt.xhtml": "<html><body><p>第一章的第一句话，写成一整句。</p></body></html>",
+            "text/ch2.xhtml": "<html><body><h1>第二章 收尾</h1></body></html>",
+        },
+    )
+    book = EpubBook.open(path)
+    assert book.section_count == 2
+    assert book.section_documents(0) == (0, 1)
+    assert book.section_index_for_href(book.spine[1].href) == 0
+    # One column, read from the top: the title picture, then the chapter.
+    assert book.blocks(0)[0].is_image
+    assert [strip_word_joiners(block.text) for block in book.blocks(0) if block.text.strip()] == [
+        "第一章的第一句话，写成一整句。"
+    ]
+    # Neither document gained a row of its own, and the chapter does not become a
+    # second section: the panel shows the book's own two rows.
+    assert [entry.title for entry in book.toc] == ["第一章 标题图", "第二章 收尾"]
+    assert book.next_section(0) == 1
+
+
+def test_a_document_that_names_itself_is_not_absorbed(build_epub) -> None:
+    """The rule stops at the first document that speaks for itself (ADR-021).
+
+    This is the omnibus's shape - each volume opens on a cover picture, and what
+    follows names itself in its own first line - and it is where the line is drawn:
+    absorbing a document that has a row takes that row out of the panel, which is the
+    map the reader navigates by.  Measured on the real book, that would take the
+    omnibus from 135 sections and 134 rows to 4 sections and 131 rows.
+    """
+    path = _chapter_book(
+        build_epub,
+        {
+            "text/vol.xhtml": "<html><body><p><img src='vol.png'/></p></body></html>",
+            "text/series.xhtml": "<html><body><p>华章经典·金融投资</p></body></html>",
+            "text/ch.xhtml": "<html><body><h1>第1章 业余投资者</h1></body></html>",
+        },
+        ncx=ONE_VOLUME_NCX,
+    )
+    book = EpubBook.open(path)
+    assert book.section_count == 3  # the cover keeps to itself
+    assert book.section_documents(0) == (0,)
+    # The documents after it named themselves, so both are still rows - under the
+    # volume, which is the only part the book declared (ADR-019 / ADR-020) - and the
+    # cover's own row is still where the reader left it.
+    assert [entry.title for entry in book.toc] == ["第一卷"]
+    assert [row.title for row in book.toc[0].children] == [
+        "华章经典·金融投资",
+        "第1章 业余投资者",
+    ]
+
+
+def test_a_document_outside_the_reading_order_is_not_absorbed(build_epub) -> None:
+    """A ``linear="no"`` document was taken out of the text, chapters included (FR-016)."""
+    path = _chapter_book(
+        build_epub,
+        {
+            "text/ch1.xhtml": "<html><body><p><img src='title.png'/></p></body></html>",
+            "text/ad.xhtml": "<html><body><p>广告页，同行的读者不会读到它。</p></body></html>",
+            "text/ch2.xhtml": "<html><body><h1>第二章 收尾</h1></body></html>",
+        },
+        linear_no=["text/ad.xhtml"],
+    )
+    book = EpubBook.open(path)
+    assert book.section_documents(0) == (0,)
+    assert book.next_section(0) == 2  # 下一章 walks past the advertisement, not into it
+
+
+def test_the_frontispiece_rule_leaves_the_reference_books_alone(kangpo, binan, linqi) -> None:
+    """No reference book has a row pointing at a page with nothing to read.
+
+    Their contents all point at documents that carry text, so nothing is absorbed and
+    they read exactly as they did before: the same sections, the same rows - which is
+    why the numbers measured off them in the documentation still stand (ADR-021).
+    """
+    assert [kangpo.section_count, binan.section_count, linqi.section_count] == [27, 35, 135]
+    for book in (kangpo, binan, linqi):
+        assert all(
+            len(book.section_documents(index)) == 1 for index in range(book.section_count)
+        ), book.path.name
 

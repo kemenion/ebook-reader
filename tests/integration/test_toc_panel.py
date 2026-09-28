@@ -21,6 +21,7 @@ screenshot cannot tell apart from success.
 
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 
 from PySide6.QtCore import QPointF
@@ -399,6 +400,77 @@ def test_the_panel_lists_the_chapters_of_an_omnibus_that_names_three_volumes(
     pump(RESIZE_DEBOUNCE_MS + 100)
     assert controller.sectionIndex == targets[at] == 134
     assert controller.currentTocRow == at
+    assert warnings == []
+
+
+# ------------------------------ the page a chapter opens on (FR-016 / ADR-021 / 缺陷 27)
+
+#: Two chapters, each a title picture in a document of its own followed by its text:
+#: the shape a converted book has, and the one that made a row lead to a cover.
+FRONTISPIECE_NCX = """<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <navMap>
+    <navPoint id="n1"><navLabel><text>第一章 标题图</text></navLabel>
+      <content src="text/ch1.xhtml"/></navPoint>
+    <navPoint id="n2"><navLabel><text>第二章 收尾</text></navLabel>
+      <content src="text/ch2.xhtml"/></navPoint>
+  </navMap>
+</ncx>
+"""
+
+#: A 2x2 PNG, so that the frontispiece really is an image the renderer can decode.
+ONE_PIXEL_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAADklEQVR42mP4DwYMEAoA"
+    "U7oL9YXEbhEAAAAASUVORK5CYII="
+)
+
+
+def test_clicking_the_row_of_a_title_picture_reads_the_chapter(
+    shell, build_epub, warnings
+) -> None:
+    """A row that points at a page with nothing to read leads to the chapter (FR-016).
+
+    This is the shape that made the panel say one thing and do another: the contents
+    points at the chapter's title picture, the chapter itself is the next document, and
+    read as one document per section the row led to a picture while the text sat one
+    section away - reachable only by paging into it, while the line at the end of the
+    picture announced the chapter *after* the one the reader asked for (缺陷 27).
+
+    Now the row and the chapter are one section: what the reader clicks opens the
+    chapter, the way on is at the end of it, and the panel lists exactly the rows it
+    listed before - the documents that joined the section are the ones that had no row.
+    """
+    body = "".join(f"<p>第{i}句话写在这里。</p>" for i in range(140))
+    path = build_epub(
+        {
+            "text/ch1.xhtml": "<html><body><h1><img src='title.png'/></h1></body></html>",
+            "text/ch1txt.xhtml": f"<html><body>{body}</body></html>",
+            "text/ch2.xhtml": "<html><body><p>第二章 收尾</p></body></html>",
+        },
+        resources={"toc.ncx": FRONTISPIECE_NCX, "text/title.png": ONE_PIXEL_PNG},
+        manifest={"toc.ncx": ("application/x-dtbncx+xml", "ncx")},
+    )
+    _, window, controller = shell
+    assert controller.openBook(str(path))
+    pump(RESIZE_DEBOUNCE_MS + 100)
+
+    assert [entry["title"] for entry in controller.tocItems] == ["第一章 标题图", "第二章 收尾"]
+    assert controller.sectionCount == 2
+
+    rows = _rows(item(window, "tocList"))
+    click(window, centre(rows[0]))
+    pump(RESIZE_DEBOUNCE_MS + 100)
+    assert controller.sectionIndex == 0
+    assert controller.sectionTitle == "第一章 标题图"
+
+    # The picture is not the whole of it: the chapter is in the same column, so there is
+    # text to read below it - and the chapter ends where the *chapter* ends, which is
+    # where the line naming the next one appears.
+    assert controller.contentHeight > 3 * controller.viewportHeight
+    controller.scrollToSectionEnd()
+    pump(RESIZE_DEBOUNCE_MS + 100)
+    assert controller.atSectionEnd
+    assert controller.nextSectionTitle == "第二章 收尾"
     assert warnings == []
 
 

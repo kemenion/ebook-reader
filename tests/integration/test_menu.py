@@ -15,7 +15,7 @@ import pytest
 from PySide6.QtCore import QMetaObject, QObject, Qt
 from PySide6.QtQuick import QQuickItem
 
-from conftest import at, centre, click, item, pump, visible
+from conftest import at, centre, click, item, pump, set_window_size, visible
 
 MENU = "readerMenu"
 
@@ -146,6 +146,10 @@ def test_the_right_button_opens_the_menu_over_the_text(
     _, window, controller = shell
     assert controller.openBook(str(kangpo_path))
     pump(240)
+    # The documented default size, because this test is about where the menu lands:
+    # a menu opened near the window's right edge is moved left to stay on screen, and
+    # how far the edge is from the click depends on the display (FR-077).
+    set_window_size(window)
 
     assert not menu(window).property("visible")
 

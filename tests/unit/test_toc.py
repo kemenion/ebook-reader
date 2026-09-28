@@ -18,8 +18,9 @@ import pytest
 
 from ebook_reader.app.controller import _flatten_toc
 from ebook_reader.domain import EpubBook
-from ebook_reader.domain.models import TocEntry
 from ebook_reader.domain.epub.toc import parse_landmarks, parse_nav, parse_ncx
+from ebook_reader.domain.html.kinsoku import strip_word_joiners
+from ebook_reader.domain.models import TocEntry
 
 NAV = """<?xml version="1.0" encoding="utf-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
@@ -774,4 +775,50 @@ def test_the_sections_a_flat_contents_leaves_out_join_the_row_above_them(build_e
         ("下卷 收官", 4, 0),
         ("第5节 收尾", 5, 1),
     ]
+
+
+# ---------------------- the row a title picture is named by (FR-012 / FR-016 / ADR-021)
+
+#: Two chapters, each a title picture in a document of its own followed by its text.
+FRONTISPIECE_NCX = """<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <navMap>
+    <navPoint id="n1"><navLabel><text>第一章 标题图</text></navLabel>
+      <content src="text/ch1.xhtml"/></navPoint>
+    <navPoint id="n2"><navLabel><text>第二章 收尾</text></navLabel>
+      <content src="text/ch2.xhtml"/></navPoint>
+  </navMap>
+</ncx>
+"""
+
+
+def test_a_row_that_points_at_a_title_picture_leads_into_the_chapter(build_epub) -> None:
+    """The row keeps the title the book gave it, and gains the chapter (FR-016).
+
+    A converted book writes each chapter as a title picture and then the text, and
+    points its contents at the picture.  The picture is not a section of its own - it
+    is the page the chapter opens on - so the row lands on the chapter; and nothing
+    changes in the panel, because the documents it takes along are exactly the ones
+    that would have had no row at all (缺陷 27 / ADR-021).
+    """
+    path = _ncx_book(
+        build_epub,
+        {
+            "text/ch1.xhtml": "<html><body><h1><img src='title.png'/></h1></body></html>",
+            "text/ch1txt.xhtml": "<html><body><p>第一章的正文，一句话。</p></body></html>",
+            "text/ch2.xhtml": "<html><body><p>第二章 收尾</p></body></html>",
+        },
+        ncx=FRONTISPIECE_NCX,
+    )
+    book = EpubBook.open(path)
+    # Two rows for three documents: the chapter's own first line is a sentence, so it
+    # neither had a row before nor has one now - the row count is the book's business.
+    assert _contents(path) == [("第一章 标题图", 0), ("第二章 收尾", 1)]
+    # And the row that the reader clicks leads to the chapter's text, not to the
+    # picture alone: the text is in the same section, at the top of which the picture
+    # is still the first thing shown.
+    assert book.section_documents(0) == (0, 1)
+    assert "第一章的正文，一句话。" in "".join(
+        strip_word_joiners(block.text) for block in book.blocks(0)
+    )
 
