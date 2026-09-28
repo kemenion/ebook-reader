@@ -20,15 +20,17 @@ Rectangle {
     readonly property color cAccent: ctl ? ctl.accentColor : "#cfe1ff"
     readonly property string cBookTitle: ctl ? ctl.bookTitle : ""
     readonly property var cItems: ctl ? ctl.tocItems : []
+    // Read from the controller rather than out of the rows: a row that carried its own
+    // "current" flag made every jump republish the list, and a view handed a new model
+    // starts over at its first row (缺陷 25).  Same shape as OutlinePanel.
+    readonly property int cCurrentRow: ctl ? ctl.currentTocRow : -1
 
     // Width comes from Main.qml, which shares the window between the open columns.
     color: cPanel
 
     function revealCurrent() {
-        if (!ctl) { return }
-        const row = ctl.currentTocRow
-        if (row >= 0) {
-            list.positionViewAtIndex(row, ListView.Center)
+        if (cCurrentRow >= 0 && cCurrentRow < cItems.length) {
+            list.positionViewAtIndex(cCurrentRow, ListView.Center)
         }
     }
 
@@ -45,58 +47,95 @@ Rectangle {
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
         delegate: ItemDelegate {
+            id: row
             width: list.width
             height: Math.max(38, label.implicitHeight + 16)
-            highlighted: modelData.current
+            // Contents levels start at 0 for the top level (the nav and NCX walkers both
+            // start there), unlike the outline's headings, which start at 1.
+            readonly property int rowLevel: Math.max(0, modelData.level || 0)
+            highlighted: modelData.row === root.cCurrentRow
 
             contentItem: Text {
                 id: label
                 text: modelData.title
                 color: root.cPanelText
-                font.pixelSize: 15
-                font.bold: modelData.current
+                // A top-level title keeps the panel's own size, a nested one steps down
+                // a notch: depth stays legible even where the indent is easy to miss.
+                font.pixelSize: row.rowLevel > 0 ? 14 : 15
+                font.bold: row.highlighted
                 wrapMode: Text.Wrap
-                leftPadding: 16 + modelData.level * 16
-                rightPadding: 14
+                leftPadding: 16 + row.rowLevel * 16
+                rightPadding: 16
                 verticalAlignment: Text.AlignVCenter
             }
 
             background: Rectangle {
-                color: parent.highlighted ? root.cAccent
-                       : (parent.hovered ? root.cMuted : "transparent")
-                opacity: parent.highlighted ? 0.55 : (parent.hovered ? 0.14 : 1.0)
+                id: rowBackground
+                // Colour with alpha rather than a translucent item: item opacity would
+                // fade the guides and the bar along with the fill.
+                color: row.highlighted ? Qt.alpha(root.cAccent, 0.55)
+                       : (row.hovered ? Qt.alpha(root.cMuted, 0.14) : "transparent")
+
+                // One hairline per level above this row, drawn at the indent that level's
+                // own text starts at, so a nested row reads as sitting *under* its parent
+                // instead of floating at an unexplained distance to its right.
+                Repeater {
+                    model: row.rowLevel
+                    Rectangle {
+                        x: 16 + index * 16 - 6
+                        width: 1
+                        height: rowBackground.height
+                        color: root.cMuted
+                        opacity: 0.3
+                    }
+                }
+
+                // The reader's place: the fill says which row, the bar says "and you are
+                // in it" - the part that stays visible when the fill is pale.
+                Rectangle {
+                    anchors.left: parent.left
+                    width: 3
+                    height: parent.height
+                    visible: row.highlighted
+                    color: root.cAccent
+                }
             }
 
             onClicked: if (root.ctl) { root.ctl.goToTocRow(modelData.row) }
         }
     }
 
+    // Same shape as the outline column's header - heading over the book's title - so the
+    // two maps that face the page read as one design instead of two.
     Rectangle {
         id: header
         width: parent.width
-        height: 54
+        height: labels.implicitHeight + 26
         color: "transparent"
 
-        Text {
+        Column {
+            id: labels
             anchors.left: parent.left
-            anchors.leftMargin: 18
-            anchors.verticalCenter: parent.verticalCenter
-            text: "目录"
-            color: root.cPanelText
-            font.pixelSize: 19
-            font.bold: true
-        }
-
-        Text {
             anchors.right: parent.right
+            anchors.leftMargin: 18
             anchors.rightMargin: 18
             anchors.verticalCenter: parent.verticalCenter
-            text: root.cBookTitle
-            color: root.cMuted
-            font.pixelSize: 12
-            elide: Text.ElideMiddle
-            width: Math.min(180, parent.width * 0.55)
-            horizontalAlignment: Text.AlignRight
+            spacing: 3
+
+            Text {
+                text: "目录"
+                color: root.cPanelText
+                font.pixelSize: 19
+                font.bold: true
+            }
+
+            Text {
+                width: parent.width
+                text: root.cBookTitle.length > 0 ? root.cBookTitle : "未打开书籍"
+                color: root.cMuted
+                font.pixelSize: 12
+                elide: Text.ElideRight
+            }
         }
 
         Rectangle {

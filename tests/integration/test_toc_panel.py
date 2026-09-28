@@ -1,17 +1,22 @@
-"""The table of contents as a permanent fixture: it stays, and it has a button.
+"""The table of contents as a permanent fixture: it stays, has a button, and holds its place.
 
-Two failures are behind this module.  The panel used to close itself as soon as a
+Three failures are behind this module.  The panel used to close itself as soon as a
 chapter was clicked - a rule inherited from the days it floated over the text
 (FR-015), and left standing after it took a column of its own, so a reader following
-the contents had to reopen it at every hop.  And the only way to open it was the `T`
-key, which is documented inside the settings drawer, which is opened with a key: a
-reader who does not know the shortcut cannot find the map at all (FR-013).
+the contents had to reopen it at every hop.  The only way to open it was the `T` key,
+which is documented inside the settings drawer, which is opened with a key: a reader
+who does not know the shortcut cannot find the map at all (FR-013).  And in a long
+contents - 彼得林奇 has 134 rows - clicking a chapter threw the list back to its own
+first row, because the reader's place travelled *inside* the rows: every jump
+republished them, and a view handed a new model starts over (缺陷 25).
 
-So the panel now opens with the book and stays until it is closed on purpose, and
-the one control that is always on screen - the button at the bottom left - toggles it
-with a single click.  The harness is the shared one; the tests click the real item
-through Qt's own event delivery, because a control that is drawn but does not react
-is exactly the failure a screenshot cannot tell apart from success.
+So the panel now opens with the book and stays until it is closed on purpose, the one
+control that is always on screen - the button at the bottom left - toggles it with a
+single click, and the rows describe the book while the reader's place travels on a
+signal of its own, so scrolling to a chapter keeps the map where the reader put it.
+The harness is the shared one; the tests click the real item through Qt's own event
+delivery, because a control that is drawn but does not react is exactly the failure a
+screenshot cannot tell apart from success.
 """
 
 from __future__ import annotations
@@ -21,7 +26,7 @@ from pathlib import Path
 from PySide6.QtCore import QPointF
 from PySide6.QtQuick import QQuickItem
 
-from conftest import RESIZE_DEBOUNCE_MS, centre, click, item, pump, visible
+from conftest import RESIZE_DEBOUNCE_MS, centre, click, item, press, pump, visible
 
 
 def toggle_button(window) -> QQuickItem:
@@ -44,6 +49,23 @@ def _rows(listing: QQuickItem) -> list[QQuickItem]:
             found.append(child)
         pending.extend(child.childItems())
     return sorted(found, key=lambda child: child.y())
+
+
+def _on_screen_rows(listing: QQuickItem) -> list[QQuickItem]:
+    """The rows a click can actually reach, top to bottom.
+
+    After the list has been scrolled most of its delegates are outside the viewport,
+    and the view clips them: a click aimed at one of those would land on whatever is
+    drawn at that window position instead.  Scene coordinates are what tells the two
+    apart - a delegate's own ``y`` is measured in the content, not on the screen.
+    """
+    top = listing.mapToScene(QPointF(0, 0)).y()
+    bottom = top + listing.height()
+    return [
+        row
+        for row in _rows(listing)
+        if top <= row.mapToScene(QPointF(0, row.height() / 2)).y() <= bottom
+    ]
 
 
 # ---------------------------------------------------------------------- the button
@@ -159,9 +181,85 @@ def test_clicking_a_chapter_leaves_the_map_on_screen(
     assert controller.tocVisible
     assert (controller.sectionIndex, controller.scrollOffset) != launched
     assert controller.currentTocRow != before_row and controller.currentTocRow >= 0
-    # Read again: the view rebuilt its rows for the new place in the book, and the
-    # row the reader landed on is the one it marks as current.
+    # The row the reader landed on is the one the panel marks - and saying so did not
+    # rebuild the rows: the highlight travels on its own signal (缺陷 25).
     assert any(child.property("highlighted") for child in _rows(listing))
+    assert warnings == []
+
+
+def test_clicking_a_chapter_keeps_the_map_where_the_reader_scrolled_it(
+    shell, linqi_path: Path, warnings
+) -> None:
+    """Finding a chapter in a long map and clicking it is not a reason to lose the scroll.
+
+    彼得林奇 is the book that shows the failure (缺陷 25): 134 rows, about a third of
+    them on screen at once.  The highlighted row used to travel *inside* the rows, so
+    every jump handed the view a rebuilt model - and a view given a new model starts
+    over at its first row.  A reader who scrolled to a chapter and clicked it was thrown
+    back to the top of the map, which is precisely where they did not want to be.
+
+    The highlight now travels on its own signal and the rows describe the book and
+    nothing else, so a click leaves the model, and with it `contentY`, the delegates and
+    the scroll bar, exactly where the reader left them.
+    """
+    _, window, controller = shell
+    assert controller.openBook(str(linqi_path))
+    pump(RESIZE_DEBOUNCE_MS + 100)
+
+    listing = item(window, "tocList")
+    reachable = listing.property("contentHeight") - listing.property("height")
+    assert reachable > 500, "the map has to be scrollable for this test to mean anything"
+    listing.setProperty("contentY", reachable / 2)
+    pump(150)
+    scrolled_to = listing.property("contentY")
+    assert scrolled_to > 0
+
+    rows = _on_screen_rows(listing)
+    assert len(rows) > 2, "a click needs a row to land on where the reader scrolled to"
+    clicked = rows[len(rows) // 2]
+    launched = controller.sectionIndex
+
+    click(window, centre(clicked))
+    pump(RESIZE_DEBOUNCE_MS + 100)
+
+    assert controller.sectionIndex != launched                 # the jump happened ...
+    assert controller.currentTocRow >= 0
+    assert listing.property("contentY") == scrolled_to         # ... and the map stayed put
+    # The row the reader asked for is the one marked: on this book the rows are one per
+    # section in reading order, so no earlier row can be the last one behind the place
+    # the click landed on.
+    assert clicked.property("highlighted")
+    assert warnings == []
+
+
+def test_moving_on_leaves_the_map_where_the_reader_left_it(
+    shell, linqi_path: Path, warnings
+) -> None:
+    """The map follows the reader by being *reopened*, not by shifting under their hand.
+
+    A chapter change announces the row it landed on, and that announcement used to
+    arrive as a rebuilt list - so `]`, the next-chapter key, dragged the column back to
+    its first row while the reader was reading (缺陷 25).  The row has a signal of its
+    own now: the highlight moves, the map does not, and `revealCurrent()` - which runs
+    when the column opens - is what centres the map on the reader's place.
+    """
+    _, window, controller = shell
+    assert controller.openBook(str(linqi_path))
+    pump(RESIZE_DEBOUNCE_MS + 100)
+
+    listing = item(window, "tocList")
+    reachable = listing.property("contentHeight") - listing.property("height")
+    assert reachable > 500
+    listing.setProperty("contentY", reachable / 2)
+    pump(150)
+    scrolled_to = listing.property("contentY")
+    before_row = controller.currentTocRow
+
+    press(window, "]")                       # the next chapter, through the real key path
+    pump(RESIZE_DEBOUNCE_MS + 100)
+
+    assert controller.currentTocRow != before_row and controller.currentTocRow >= 0
+    assert listing.property("contentY") == scrolled_to
     assert warnings == []
 
 
@@ -196,7 +294,8 @@ def test_a_row_that_names_an_anchor_lands_on_it(
     assert controller.scrollOffset == 0.0               # a row with no anchor starts here
     assert controller.currentTocRow == at
 
-    # Read again: the jump rebuilt the rows, and the old delegates went with it.
+    # The same delegates, in the same places: a jump announces a new highlight and
+    # republishes nothing (缺陷 25), so the pair below can still be clicked.
     rows = _rows(listing)
     click(window, centre(rows[at + 1]))                 # the anchored row, same file
     pump(RESIZE_DEBOUNCE_MS + 100)

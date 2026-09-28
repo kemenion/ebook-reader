@@ -146,6 +146,7 @@ class ReaderController(QObject):
     settingsChanged = Signal()
     bookChanged = Signal()
     tocChanged = Signal()
+    tocRowChanged = Signal()
     errorOccurred = Signal(str)
     statusMessage = Signal(str)
 
@@ -524,14 +525,22 @@ class ReaderController(QObject):
     settingsVisible = Property(bool, _get_settings_visible, notify=layoutChanged)
 
     def _get_toc_items(self) -> list[dict[str, object]]:
-        current = self._get_current_toc_row()
+        """The book's own rows, and nothing about the reader.
+
+        The highlighted row used to be carried in these dicts as a ``current`` flag,
+        which made the list a function of the reading position: every jump produced a
+        *different* list, QML was handed a new model, and the view threw away its
+        scroll position and started over at the first row (缺陷 25).  Which row is the
+        reader's place is a property of the place, so it travels on its own signal -
+        `currentTocRow` - and the rows stay a pure projection of `_toc_flat`.  The
+        outline panel has worked this way from the start (FR-018).
+        """
         return [
             {
                 "title": entry.title,
                 "level": entry.level,
                 "section": section,
                 "row": row,
-                "current": row == current,
             }
             for row, (entry, section) in enumerate(self._toc_flat)
         ]
@@ -541,7 +550,9 @@ class ReaderController(QObject):
     def _get_current_toc_row(self) -> int:
         return self._toc_row_at(self._section_index, self._scroll_offset)
 
-    currentTocRow = Property(int, _get_current_toc_row, notify=tocChanged)
+    # `tocRowChanged`, not `tocChanged`: the rows above have to stay untouched when
+    # the highlight moves, or the view rebuilds its model and loses its place.
+    currentTocRow = Property(int, _get_current_toc_row, notify=tocRowChanged)
 
     def _toc_row_at(self, section_index: int, offset: float) -> int:
         """The contents row the reader is at, or ``-1`` when the place has no row.
@@ -701,6 +712,9 @@ class ReaderController(QObject):
         self.viewChanged.emit()
         self.bookChanged.emit()
         self.tocChanged.emit()
+        # `tocChanged` no longer carries the highlight, and closing never goes through
+        # `_publish_view`, so the answer "-1, there is no row" needs its own word.
+        self.tocRowChanged.emit()
         self.layoutChanged.emit()
 
     def _offset_for_state(self, state: BookState) -> float:
@@ -877,8 +891,9 @@ class ReaderController(QObject):
         # disagrees with the book; keeping the two apart is also what lets the href be
         # resolved against the spine while the anchor is resolved against the text.
         #
-        # No signal of its own: `goToSection` republishes the window, which emits
-        # `tocChanged` too - the highlight of the current row is what has to move.
+        # No signal of its own: `goToSection` republishes the window, which announces
+        # the new highlight (`tocRowChanged`) - the rows themselves do not move, and it
+        # is only the panel's idea of "you are here" that has to follow (缺陷 25).
         self.goToSection(section, entry.fragment)
 
     @Slot(int)
@@ -1169,13 +1184,17 @@ class ReaderController(QObject):
             self._engine.prefetch(self._section_index, self._scroll_offset)
         self.viewChanged.emit()
         # Which row the panel highlights is a property of the place, not of the
-        # document - a document can hold several rows (FR-013).  Signalled only when it
-        # changes: scrolling inside one chapter would otherwise rebuild the panel's rows
-        # on every wheel notch.
+        # document - a document can hold several rows (FR-013).  It is announced on a
+        # signal of its own, so that moving it cannot republish the rows: while the two
+        # travelled together, every jump handed QML a new model and the panel fell back
+        # to its first row (缺陷 25).  And only when it *changes*: `_toc_row_at` walks
+        # the rows of the current document and asks the section for their anchors, which
+        # is not work to redo on every wheel notch (ADR-017 ④).  `viewChanged` would do
+        # exactly that, which is why the highlight does not ride on it.
         row = self._get_current_toc_row()
         if set_section or row != self._toc_row:
             self._toc_row = row
-            self.tocChanged.emit()
+            self.tocRowChanged.emit()
         self._save_state()
 
     def _save_state(self) -> None:
