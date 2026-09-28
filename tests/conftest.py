@@ -101,7 +101,7 @@ def _headings(book, index: int) -> list[int]:
 
 @pytest.fixture(scope="session")
 def heading_section(kangpo) -> int:
-    """The 康波 section carrying the most headings: the fullest outline available.
+    """The section of the EPUB 3 book carrying the most headings: the fullest outline available.
 
     The outline column is heading-only (ADR-016), so a test that needs rows has to
     be looking at a section that has headings - the book opens on its cover, which
@@ -115,9 +115,9 @@ def heading_section(kangpo) -> int:
 
 @pytest.fixture(scope="session")
 def headingless_section(binan) -> int:
-    """The longest 币安 section with no headings: the one with nothing to list.
+    """The longest section of the EPUB 2 book with no headings: the one with nothing to list.
 
-    币安 is the book that used to exercise the page-per-row fallback; with that gone
+    the EPUB 2 book used to exercise the page-per-row fallback; with that gone
     it is the book that proves a section without headings gets no outline at all.
     """
     candidates = [

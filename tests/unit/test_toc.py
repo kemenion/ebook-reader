@@ -101,12 +101,12 @@ def test_section_lookup_ignores_the_anchor(kangpo) -> None:
 def test_a_row_can_be_both_scrolled_and_anchored(binan) -> None:
     """The reference case: two rows in one file, one of them anchored (FR-014).
 
-    币安's NCX points 推薦語 and 獻詞 at the same document; before the anchor was kept,
+    the EPUB 2 book's NCX points 推薦語 and 獻詞 at the same document; before the anchor was kept,
     both rows landed on the top of it, so the map said the second chapter began where
     the first one did.
 
     The pair is searched for rather than assumed to be the first two rows: the panel
-    also carries the rows the book leaves unnamed (FR-012), and 币安's 免责声明 comes
+    also carries the rows the book leaves unnamed (FR-012), and the EPUB 2 book's 免责声明 comes
     before that pair.
     """
     rows = _flatten_toc(binan.toc, binan)
@@ -530,4 +530,248 @@ def test_the_omnibus_shows_every_chapter_the_keys_walk_through(linqi) -> None:
     assert contents["战胜华尔街Beating the Street（珍藏版）"] == 3       # the book's own row
     assert contents["第1章 业余投资者比专业投资者业绩更好"] == 12       # a chapter's own name
     assert contents["后记 马里兰之旅的感悟"] == linqi.section_count - 1
+    # The three rows the book wrote are the hierarchy; everything else is inside one of
+    # them, so the panel draws a tree rather than one long list (ADR-020).
+    assert {entry.level for entry, _ in rows} == {0, 1}
+
+
+# ------------------------ a contents that draws no hierarchy of its own (FR-012 / ADR-020)
+
+
+_NAV_TEMPLATE = """<?xml version="1.0" encoding="utf-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+  <body>
+    <nav epub:type="toc">
+      <ol>
+{rows}
+      </ol>
+    </nav>
+  </body>
+</html>
+"""
+
+
+def _flat_nav_book(build_epub, rows, documents, **kwargs):
+    """A book whose only navigation is a flat ``<ol>`` of *rows* - one ``<li>`` per row.
+
+    ``rows`` are ``(title, href)`` pairs in reading order and all on the same level, which
+    is the shape the EPUB 3 book's own ``nav.xhtml`` has: a list of names with no nesting in it,
+    so the only hierarchy the reader can show is the one the documents were written with.
+    """
+    items = "\n".join(f'        <li><a href="{href}">{title}</a></li>' for title, href in rows)
+    return build_epub(
+        documents,
+        resources={"nav.xhtml": _NAV_TEMPLATE.format(rows=items)},
+        manifest={"nav.xhtml": ("application/xhtml+xml", "nav")},
+        **kwargs,
+    )
+
+
+def test_a_flat_nav_takes_its_hierarchy_from_the_headings_of_its_sections(build_epub) -> None:
+    """A list of names with no nesting is read as the shape the chapters were written in.
+
+    The navigation document puts 第一部分, two chapters and 后记 on one level - which is
+    what the EPUB 3 book's own ``nav.xhtml`` does with 26 rows - so the panel draws a part and its
+    chapters in one column (缺陷 26).  The chapters were written with the difference the
+    nav drops: the part opening is ``<h1>``, the chapters inside it are ``<h2>``.
+    """
+    path = _flat_nav_book(
+        build_epub,
+        [
+            ("第一部分", "text/part.xhtml"),
+            ("第一章", "text/ch1.xhtml"),
+            ("第二章", "text/ch2.xhtml"),
+            ("后记", "text/end.xhtml"),
+        ],
+        {
+            "text/part.xhtml": "<html><body><h1>第一部分</h1><p>正文。</p></body></html>",
+            "text/ch1.xhtml": "<html><body><h2>第一章</h2><p>正文。</p></body></html>",
+            "text/ch2.xhtml": "<html><body><h2>第二章</h2><p>正文。</p></body></html>",
+            "text/end.xhtml": "<html><body><h1>后记</h1><p>正文。</p></body></html>",
+        },
+    )
+    book = EpubBook.open(path)
+    assert [(entry.title, entry.level) for entry in book.toc] == [
+        ("第一部分", 0),
+        ("后记", 0),
+    ]
+    assert [(child.title, child.level) for child in book.toc[0].children] == [
+        ("第一章", 1),
+        ("第二章", 1),
+    ]
+    # A shape, not a sort: the rows still read in the order the book is read in.
+    assert [(entry.title, section) for entry, section in _flatten_toc(book.toc, book)] == [
+        ("第一部分", 0),
+        ("第一章", 1),
+        ("第二章", 2),
+        ("后记", 3),
+    ]
+
+
+def test_a_book_written_entirely_in_h2_is_not_indented_as_a_whole(build_epub) -> None:
+    """Only the *difference* between heading levels is a hierarchy; the tag itself is not.
+
+    A book converted to ``<h2>`` throughout has a flat contents and flat text as far as
+    the reader is concerned.  Indenting every row by one because its headings happen to be
+    ``<h2>`` would say something the book never said, which is why the shallowest heading
+    in the book is the top row.
+    """
+    path = _flat_nav_book(
+        build_epub,
+        [
+            ("第一部分", "text/part.xhtml"),
+            ("第一章", "text/ch1.xhtml"),
+            ("第二章", "text/ch2.xhtml"),
+            ("后记", "text/end.xhtml"),
+        ],
+        {
+            "text/part.xhtml": "<html><body><h2>第一部分</h2><p>正文。</p></body></html>",
+            "text/ch1.xhtml": "<html><body><h2>第一章</h2><p>正文。</p></body></html>",
+            "text/ch2.xhtml": "<html><body><h2>第二章</h2><p>正文。</p></body></html>",
+            "text/end.xhtml": "<html><body><h2>后记</h2><p>正文。</p></body></html>",
+        },
+    )
+    book = EpubBook.open(path)
+    assert [(entry.title, entry.level, entry.children) for entry in book.toc] == [
+        ("第一部分", 0, ()),
+        ("第一章", 0, ()),
+        ("第二章", 0, ()),
+        ("后记", 0, ()),
+    ]
+
+
+def test_a_section_that_is_not_a_heading_never_becomes_a_parent(build_epub) -> None:
+    """A row whose section declares nothing takes the place of the row that declares one.
+
+    The middle document opens with a plain ``<p>`` - a converter's chapter title, which is
+    how most of the omnibus is written.  Read as "one level deeper than the row above it" it would
+    become the parent of 第二章, which did declare itself: the one thing the text can be
+    said *not* to imply.  It takes the level of the next row that names one instead, which
+    is the part it sits in.
+    """
+    path = _flat_nav_book(
+        build_epub,
+        [
+            ("第一部分", "text/part.xhtml"),
+            ("第一章", "text/ch1.xhtml"),
+            ("第二章", "text/ch2.xhtml"),
+            ("后记", "text/end.xhtml"),
+        ],
+        {
+            "text/part.xhtml": "<html><body><h1>第一部分</h1><p>正文。</p></body></html>",
+            "text/ch1.xhtml": "<html><body><p>第一章 起步</p><p>正文。</p></body></html>",
+            "text/ch2.xhtml": "<html><body><h2>第二章</h2><p>正文。</p></body></html>",
+            "text/end.xhtml": "<html><body><h1>后记</h1><p>正文。</p></body></html>",
+        },
+    )
+    book = EpubBook.open(path)
+    assert [(entry.title, entry.level) for entry in book.toc] == [("第一部分", 0), ("后记", 0)]
+    assert [(child.title, child.level) for child in book.toc[0].children] == [
+        ("第一章", 1),
+        ("第二章", 1),
+    ]
+
+
+def test_a_section_that_is_not_a_heading_trails_the_level_above_it(build_epub) -> None:
+    """With nothing after it to take a level from, such a row keeps the one above.
+
+    A book whose last section opens with prose: nobody declared where it sits, and the row
+    before it is the last word on the subject - so it stays beside that row rather than
+    being lifted to the top level, and it takes nothing under it either.
+    """
+    path = _flat_nav_book(
+        build_epub,
+        [
+            ("第一部分", "text/part.xhtml"),
+            ("第一章", "text/ch1.xhtml"),
+            ("余論 收尾的話", "text/tail.xhtml"),
+        ],
+        {
+            "text/part.xhtml": "<html><body><h1>第一部分</h1><p>正文。</p></body></html>",
+            "text/ch1.xhtml": "<html><body><h2>第一章</h2><p>正文。</p></body></html>",
+            "text/tail.xhtml": "<html><body><p>余論 收尾的話</p><p>正文。</p></body></html>",
+        },
+    )
+    book = EpubBook.open(path)
+    assert [(entry.title, entry.level) for entry in book.toc] == [("第一部分", 0)]
+    assert [(child.title, child.level) for child in book.toc[0].children] == [
+        ("第一章", 1),
+        ("余論 收尾的話", 1),
+    ]
+
+
+def test_a_book_that_draws_its_own_hierarchy_is_not_re_read(build_epub) -> None:
+    """Where the book said what its parts are, that answer stands, headings or not.
+
+    The two trees disagree on purpose here: the NCX puts 第二章 inside 第一部分, while both
+    documents write their titles as ``<h1>`` - which, read off the headings, would make them
+    siblings.  The book's own division wins, because it is the one that was written down
+    rather than inferred (FR-012 / ADR-020).
+    """
+    path = _ncx_book(
+        build_epub,
+        {
+            "text/ch1.xhtml": "<html><body><h1>第一部分</h1><p>正文。</p></body></html>",
+            "text/ch2.xhtml": "<html><body><h1>第二章</h1><p>正文。</p></body></html>",
+            "text/ch5.xhtml": "<html><body><h1>第二部分</h1><p>正文。</p></body></html>",
+        },
+        ncx=NESTED_NCX,
+    )
+    book = EpubBook.open(path)
+    assert [(entry.title, entry.level) for entry in book.toc] == [
+        ("第一部分", 0),
+        ("第二部分", 0),
+    ]
+    assert [(child.title, child.level) for child in book.toc[0].children] == [("第二章", 1)]
+    assert book.toc[1].children == ()
+
+
+VOLUMES_NCX = """<?xml version="1.0" encoding="utf-8"?>
+<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/">
+  <navMap>
+    <navPoint id="v1"><navLabel><text>上卷 起步</text></navLabel>
+      <content src="text/ch1.xhtml"/></navPoint>
+    <navPoint id="v2"><navLabel><text>下卷 收官</text></navLabel>
+      <content src="text/ch4.xhtml"/></navPoint>
+  </navMap>
+</ncx>
+"""
+
+
+def test_the_sections_a_flat_contents_leaves_out_join_the_row_above_them(build_epub) -> None:
+    """A book that declares no shape gets one from the order its rows are read in.
+
+    Two volume rows and three sections they do not mention: an added section belongs to
+    the row it follows, up to where the next row begins - which is how the omnibus's 131
+    chapters end up inside its three volumes (ADR-020).  The one row before the book's
+    first name stays on the top level, because there is no row above it to belong to.
+    """
+    path = _ncx_book(
+        build_epub,
+        {
+            "text/ch0.xhtml": "<html><body><p>免责声明</p><p>正文。</p></body></html>",
+            "text/ch1.xhtml": "<html><body><p>上卷 起步</p><p>正文。</p></body></html>",
+            "text/ch2.xhtml": "<html><body><p>第2节 加仓</p><p>正文。</p></body></html>",
+            "text/ch3.xhtml": "<html><body><p>第3节 减仓</p><p>正文。</p></body></html>",
+            "text/ch4.xhtml": "<html><body><p>下卷 收官</p><p>正文。</p></body></html>",
+            "text/ch5.xhtml": "<html><body><p>第5节 收尾</p><p>正文。</p></body></html>",
+        },
+        ncx=VOLUMES_NCX,
+    )
+    book = EpubBook.open(path)
+    assert [(entry.title, len(entry.children)) for entry in book.toc] == [
+        ("免责声明", 0),
+        ("上卷 起步", 2),
+        ("下卷 收官", 1),
+    ]
+    assert [
+        (entry.title, section, entry.level) for entry, section in _flatten_toc(book.toc, book)
+    ] == [
+        ("免责声明", 0, 0),
+        ("上卷 起步", 1, 0),
+        ("第2节 加仓", 2, 1),
+        ("第3节 减仓", 3, 1),
+        ("下卷 收官", 4, 0),
+        ("第5节 收尾", 5, 1),
+    ]
 

@@ -54,10 +54,41 @@ _LABEL_BAD_ENDING = "。！？；：，、,.;:!?"
 #: the middle is a sentence that happens to be short.
 _LABEL_INNER_PROSE = ("。", "！", "？", "；")
 
+#: Deepest contents level the panel can show.  A row is indented 16 px per level
+#: (``TocSidebar.qml``: ``leftPadding: 16 + rowLevel * 16``) inside a contents column that
+#: is at most 320 px wide (``Main.qml``), so a row nested deeper than this would have
+#: almost no room left for its own title; the outline column clamps its headings the same
+#: way (:data:`ebook_reader.app.controller._OUTLINE_MAX_LEVEL`, FR-018).  Nothing in the
+#: reference books comes near it: the deepest level read off their headings is 1.
+_MAX_TOC_LEVEL = 5
+
 
 def _clean(text: str) -> str:
     """Collapse whitespace and drop the layout-only word joiners (ADR-005 / FR-109)."""
     return " ".join(strip_word_joiners(text).split())
+
+
+def _label_of(block: Block) -> str:
+    """*block* as a row title, or ``""`` when it reads as prose rather than a name.
+
+    A heading is a name whatever it says - the publisher marked it as one.  A plain
+    paragraph has to read like one: short, and without the punctuation of a sentence.
+    A photo caption («2017年10月，东京工作时期每日通勤的自行车。») and a masthead («出版者：»)
+    therefore leave their section unnamed instead of filling the column with lines that
+    cannot help anyone find their place.
+
+    The layout-only word joiners (ADR-005) come off here, because this text goes into a
+    row in a list rather than into a line of the column, and an invisible character in a
+    label is what defect 11 was about (FR-109).
+    """
+    if block.is_heading:
+        return _clean(block.text)
+    text = _clean(block.text)
+    if not text or len(text) > _LABEL_MAX_CHARS:
+        return ""
+    if text[-1] in _LABEL_BAD_ENDING or any(stop in text for stop in _LABEL_INNER_PROSE):
+        return ""
+    return text
 
 
 class EpubBook:
@@ -262,10 +293,18 @@ class EpubBook:
         """What the book says its parts are - EPUB 3 navigation first, NCX second.
 
         Whatever it says, the reading order is longer than that: the reference
-        omnibus names three volumes in its NCX and is made of 135 sections, and 币安
+        omnibus names three volumes in its NCX and is made of 135 sections, and the EPUB 2 book
         leaves 11 of its 35 unnamed.  ``]`` walks all of them, so the contents column
         shows all of them too - the same list, out of the same book, either named by
         the publisher or named by the section itself (see :meth:`_fill_unnamed`).
+
+        Some books say *less* than that: they name every section and draw no hierarchy
+        at all - the EPUB 3 book's navigation document is one flat ``<ol>`` of 26 ``<li>``.  The
+        rows are all there and in order, but 第一部分 and the eighteen chapters inside
+        it arrive as siblings, so the map stops showing what the book already knows.
+        Such a tree is re-read from the text (:meth:`_nested_by_headings`) before the
+        unnamed sections are filled in, so that the added rows land in the hierarchy
+        too.
         """
         package = self.package
         for href, parser in ((package.nav_href, toc.parse_nav), (package.ncx_href, toc.parse_ncx)):
@@ -273,8 +312,99 @@ class EpubBook:
                 continue
             entries = parser(self.resource(href), _base_dir_of(href))
             if entries:
-                return self._fill_unnamed(entries)
+                return self._fill_unnamed(self._nested_by_headings(entries))
         return self._fill_unnamed(())
+
+    @staticmethod
+    def _is_flat(entries: tuple[TocEntry, ...]) -> bool:
+        """Whether *entries* declares no hierarchy at all: every row on the top level.
+
+        The parsers give a nested ``<ol>`` / ``navPoint`` one level per step, so a tree
+        whose rows are all at level 0 with no children is a book that wrote a list
+        rather than a hierarchy.  That is what makes both the hierarchy of
+        :meth:`_nested_by_headings` and the attribution of the filled rows in
+        :meth:`_fill_unnamed` applicable - where the book drew a tree, nothing about it
+        is second-guessed.
+        """
+        return all(not row.children and row.level == 0 for row in entries)
+
+    def _nested_by_headings(self, entries: tuple[TocEntry, ...]) -> tuple[TocEntry, ...]:
+        """Give a table of contents that has no hierarchy one, read off the text (FR-012).
+
+        the EPUB 3 book's navigation lists 26 rows on one level: its eight front matter and part
+        openings and its eighteen numbered chapters are drawn as siblings, so the panel
+        shows a single column where the book has three parts (缺陷 26).  The hierarchy was
+        not lost - it is in the chapter documents, written as headings: the front matter and
+        the part openings are ``<h1>``, the numbered chapters are ``<h2>``.
+
+        So a flat contents is read the way a person reads the book: a row whose own
+        first heading is shallower than the next row's is its parent.  Levels are
+        shifted so that the shallowest heading in the book is the top row - a book that
+        writes everything as ``<h2>`` is not indented as a whole, and the EPUB 2 book, whose
+        sections are not headings at all, keeps the flat list it declared.  The nesting
+        stops at :data:`_MAX_TOC_LEVEL`.
+
+        A row whose section does not name a heading says nothing about its own place, so
+        it is given the level of the next row that does - or, when nothing after it does,
+        the level of the row above.  It can therefore never be the parent of a row that
+        did declare where it belongs, which is the one thing the text can be said *not*
+        to imply: a chapter title written as a plain ``<p>`` is a chapter, not a part.
+
+        Only a book whose contents declares no hierarchy of its own comes here: where
+        the book said what its parts are, that answer is kept, whatever its headings
+        look like - the text is read for the level the contents flattened, not to
+        overrule the contents (FR-012).
+        """
+        if not entries or not self._is_flat(entries):
+            return entries
+        written: list[int] = []
+        for row in entries:
+            index = self.section_index_for_href(row.href)
+            written.append(self._section_name(index)[1] if index >= 0 else 0)
+        headings = [level for level in written if level > 0]
+        if not headings:
+            return entries
+        base = min(headings)
+
+        def normalized(level: int) -> int:
+            return max(0, min(level - base, _MAX_TOC_LEVEL))
+
+        # The level of the next row that named one, so that a row which named none can
+        # take it without ever becoming the parent of a row that did.
+        after: list[int | None] = [None] * len(entries)
+        following: int | None = None
+        for position in range(len(entries) - 1, -1, -1):
+            if written[position] > 0:
+                following = normalized(written[position])
+            after[position] = following
+        levels: list[int] = []
+        for position, level in enumerate(written):
+            if level > 0:
+                levels.append(normalized(level))
+            elif after[position] is not None:
+                levels.append(after[position])
+            else:
+                levels.append(levels[-1] if levels else 0)
+        children: list[list[int]] = [[] for _ in entries]
+        roots: list[int] = []
+        open_rows: list[int] = []
+        for position, level in enumerate(levels):
+            while open_rows and levels[open_rows[-1]] >= level:
+                open_rows.pop()
+            if open_rows:
+                children[open_rows[-1]].append(position)
+            else:
+                roots.append(position)
+            open_rows.append(position)
+        # A row's children always follow it, so the tree is built back to front.
+        built: list[TocEntry] = list(entries)
+        for position in range(len(entries) - 1, -1, -1):
+            built[position] = replace(
+                entries[position],
+                level=levels[position],
+                children=tuple(built[child] for child in children[position]),
+            )
+        return tuple(built[root] for root in roots)
 
     def _fill_unnamed(self, entries: tuple[TocEntry, ...]) -> tuple[TocEntry, ...]:
         """Add a row for every section of the reading order that no row names (FR-012).
@@ -284,6 +414,17 @@ class EpubBook:
         read it for - and the tree the book wrote keeps its shape: only the lines it
         left out are added, inside the part of the tree they belong to and at that
         part's own level.
+
+        A contents that declares no hierarchy at all has no such part to put them in,
+        and a reader looking for a chapter the book forgot to list looks for it under
+        the row it follows: in a book that wrote a flat list, an added row becomes a
+        child of the row above it, and the rows before the first name of the book stay
+        on the top level (that is the EPUB 2 book's 免责声明, which comes before everything the NCX
+        names).  The omnibus is the case this is for: its three volume rows take the
+        31, 66 and 32 sections that follow them, which is the book's own division.  It
+        is an inference from reading order, and is recorded as one (ADR-020);
+        where the book drew a hierarchy, nothing is inferred and the rows stay where it
+        put them.
 
         A ``linear="no"`` document is skipped: it is not part of the order the reader
         walks, which is also why 「下一章」steps over it (FR-016).
@@ -313,6 +454,7 @@ class EpubBook:
             return entries
 
         taken = 0
+        adopt = self._is_flat(entries)
 
         def splice(
             rows: tuple[TocEntry, ...], level: int, bound: int
@@ -337,6 +479,24 @@ class EpubBook:
                         row,
                         children=splice(row.children, level + 1, after if after >= 0 else bound),
                     )
+                elif adopt and start >= 0:
+                    # A flat list has no part to belong to, so the sections between this
+                    # row and the next one are put under it.  A row whose successor points
+                    # nowhere is left alone rather than taking the rest of the book with
+                    # it; a row that points nowhere itself takes nothing, because the
+                    # panel would draw its children under a row that is not there.
+                    after = (
+                        self._subtree_start(rows[position + 1]) if position + 1 < len(rows) else -1
+                    )
+                    if after >= 0 or position + 1 == len(rows):
+                        end = after if after >= 0 else bound
+                        adopted: list[TocEntry] = []
+                        while taken < len(pending) and pending[taken][0] < end:
+                            adopted.append(
+                                replace(pending[taken][1], level=min(level + 1, _MAX_TOC_LEVEL))
+                            )
+                            taken += 1
+                        row = replace(row, children=tuple(adopted))
                 out.append(row)
             while taken < len(pending) and pending[taken][0] < bound:
                 out.append(replace(pending[taken][1], level=level))
@@ -375,7 +535,7 @@ class EpubBook:
         A section is named by the first thing it says: a heading when the publisher
         marked one, and otherwise its first line of text - which is how a book split
         by a converter writes its chapter titles ("第1章 业余投资者比专业投资者业绩更好" is
-        an ordinary ``<p>`` in 林奇).  That name is what the contents row shows, and
+        an ordinary ``<p>`` in the omnibus).  That name is what the contents row shows, and
         what the 「下一章」line shows when the reader reaches the end of a section
         (FR-074).
 
@@ -386,45 +546,43 @@ class EpubBook:
         full, which is the parse the reader is about to need anyway: it is where they
         are being led.
         """
+        return self._section_name(index)[0]
+
+    def _section_name(self, index: int) -> tuple[str, int]:
+        """The name a section gives itself, and the heading level it was written at.
+
+        The name is what :meth:`_section_label` documents.  The level is the heading
+        the name came from (``1`` for ``<h1>``, up to ``6``), and ``0`` when the block
+        that named the section is not a heading at all - a converter's ``<p>`` chapter
+        title, or a section that says nothing.
+
+        It is one sniff rather than two because the two answers come from the same
+        block, and that block is already in hand: reading the head of a section is the
+        whole cost of naming it (36-45 ms for the omnibus's 135 sections), and the
+        level is what a contents that declares no hierarchy is read from
+        (:meth:`_nested_by_headings`).
+        """
         head = self._read_head(self.spine[index].href, _LABEL_SNIFF_BYTES)
         if len(head) < _LABEL_SNIFF_BYTES:
-            return self._first_label(self.blocks(index))
+            return self._first_name(self.blocks(index))
         blocks = self._sanitize(head, self.section_base_dir(index))
         position = next((at for at, block in enumerate(blocks) if block.text.strip()), -1)
         if 0 <= position < len(blocks) - 1:
-            return self._label_of(blocks[position])
-        return self._first_label(self.blocks(index))
+            return self._name_of(blocks[position])
+        return self._first_name(self.blocks(index))
 
     @classmethod
-    def _first_label(cls, blocks: tuple[Block, ...]) -> str:
-        """The name in *blocks*: the first line of theirs that says something."""
+    def _first_name(cls, blocks: tuple[Block, ...]) -> tuple[str, int]:
+        """The name in *blocks* and the level of the heading that carried it."""
         for block in blocks:
             if block.text.strip():
-                return cls._label_of(block)
-        return ""
+                return cls._name_of(block)
+        return "", 0
 
     @staticmethod
-    def _label_of(block: Block) -> str:
-        """*block* as a row title, or ``""`` when it reads as prose rather than a name.
-
-        A heading is a name whatever it says - the publisher marked it as one.  A
-        plain paragraph has to read like one: short, and without the punctuation of a
-        sentence.  A photo caption («2017年10月，东京工作时期每日通勤的自行车。») and a masthead
-        («出版者：») therefore leave their section unnamed instead of filling the column
-        with lines that cannot help anyone find their place.
-
-        The layout-only word joiners (ADR-005) come off here, because this text goes
-        into a row in a list rather than into a line of the column, and an invisible
-        character in a label is what defect 11 was about (FR-109).
-        """
-        if block.is_heading:
-            return _clean(block.text)
-        text = _clean(block.text)
-        if not text or len(text) > _LABEL_MAX_CHARS:
-            return ""
-        if text[-1] in _LABEL_BAD_ENDING or any(stop in text for stop in _LABEL_INNER_PROSE):
-            return ""
-        return text
+    def _name_of(block: Block) -> tuple[str, int]:
+        """*block* as a row title and the level to give that row (FR-012)."""
+        return _label_of(block), block.level if block.is_heading else 0
 
     def section_index_for_href(self, href: str, *, current: int = -1) -> int:
         """Find the spine index that owns *href*, ignoring any fragment, or ``-1``.

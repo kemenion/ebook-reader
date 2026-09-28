@@ -6,7 +6,7 @@ chapter was clicked - a rule inherited from the days it floated over the text
 the contents had to reopen it at every hop.  The only way to open it was the `T` key,
 which is documented inside the settings drawer, which is opened with a key: a reader
 who does not know the shortcut cannot find the map at all (FR-013).  And in a long
-contents - 彼得林奇 has 134 rows - clicking a chapter threw the list back to its own
+contents - the omnibus has 134 rows - clicking a chapter threw the list back to its own
 first row, because the reader's place travelled *inside* the rows: every jump
 republished them, and a view handed a new model starts over (缺陷 25).
 
@@ -66,6 +66,22 @@ def _on_screen_rows(listing: QQuickItem) -> list[QQuickItem]:
         for row in _rows(listing)
         if top <= row.mapToScene(QPointF(0, row.height() / 2)).y() <= bottom
     ]
+
+
+def _label(row: QQuickItem) -> QQuickItem:
+    """The text item a row draws its title with.
+
+    Found by the two properties only it has - ``text`` and the ``leftPadding`` that
+    carries the row's level - so a row drawn without its indentation fails the test
+    rather than answering from the QML source.
+    """
+    pending = list(row.childItems())
+    while pending:
+        child = pending.pop(0)
+        if child.property("leftPadding") is not None and child.property("text") is not None:
+            return child
+        pending.extend(child.childItems())
+    raise AssertionError("the contents row draws no label")
 
 
 # ---------------------------------------------------------------------- the button
@@ -187,12 +203,42 @@ def test_clicking_a_chapter_leaves_the_map_on_screen(
     assert warnings == []
 
 
+def test_a_part_and_the_chapters_inside_it_are_drawn_as_a_tree(
+    shell, kangpo_path: Path, warnings
+) -> None:
+    """The hierarchy a book's flat navigation leaves out is what the panel draws (FR-012).
+
+    the EPUB 3 book's ``nav.xhtml`` is a single ``<ol>`` of 26 rows on one level, so 第一部分 and the
+    eighteen numbered chapters after it were drawn as siblings: the map said the book was a
+    list of 26 equal things, and the three parts it is actually made of were invisible
+    (缺陷 26).  The rows carry the level their own headings were written at now, and each
+    nested row is drawn one step in from its parent - which is the difference between
+    knowing the level and showing it.
+    """
+    _, window, controller = shell
+    assert controller.openBook(str(kangpo_path))
+    pump(RESIZE_DEBOUNCE_MS + 100)
+
+    levels = [entry["level"] for entry in controller.tocItems]
+    assert levels.count(0) == 8, "the front matter, the three parts and the afterword"
+    assert levels.count(1) == 18, "every numbered chapter"
+    assert levels[:6] == [0, 0, 0, 0, 0, 1], "第一部分 at the top, 01 under it"
+
+    listing = item(window, "tocList")
+    rows = _on_screen_rows(listing)
+    part = next(row for row in rows if row.property("rowLevel") == 0)
+    chapter = next(row for row in rows if row.property("rowLevel") == 1)
+    assert part.mapToScene(QPointF(0, 0)).y() < chapter.mapToScene(QPointF(0, 0)).y()
+    assert _label(chapter).property("leftPadding") == _label(part).property("leftPadding") + 16
+    assert warnings == []
+
+
 def test_clicking_a_chapter_keeps_the_map_where_the_reader_scrolled_it(
     shell, linqi_path: Path, warnings
 ) -> None:
     """Finding a chapter in a long map and clicking it is not a reason to lose the scroll.
 
-    彼得林奇 is the book that shows the failure (缺陷 25): 134 rows, about a third of
+    the omnibus is the book that shows the failure (缺陷 25): 134 rows, about a third of
     them on screen at once.  The highlighted row used to travel *inside* the rows, so
     every jump handed the view a rebuilt model - and a view given a new model starts
     over at its first row.  A reader who scrolled to a chapter and clicked it was thrown
@@ -268,7 +314,7 @@ def test_a_row_that_names_an_anchor_lands_on_it(
 ) -> None:
     """Two rows may share a document and still lead to different places (FR-014).
 
-    币安's contents points 幣安上線 and 早年歲月 at the same file, the second at an
+    the EPUB 2 book's contents points 幣安上線 and 早年歲月 at the same file, the second at an
     anchor well inside it.  The anchor was dropped on both parsing paths, so the
     second row landed on the top of the file - exactly where the first one had just
     been - and the panel marked the first row as the reader's place even after they
@@ -332,6 +378,13 @@ def test_the_panel_lists_the_chapters_of_an_omnibus_that_names_three_volumes(
     targets = [entry["section"] for entry in controller.tocItems]
     assert targets == sorted(targets), "the rows are in reading order"
     assert len(set(targets)) == len(targets)
+
+    # The rows filled in before the book's first name and its three volume rows are the top
+    # level; each volume is followed by exactly the chapters inside it, and the next volume
+    # starts the level again - a tree, not a list with an indent in it (ADR-020).
+    assert [entry["level"] for entry in controller.tocItems] == (
+        [0, 0, 0] + [1] * 31 + [0] + [1] * 66 + [0] + [1] * 32
+    )
 
     # A real click on a row the book never named lands in that chapter.
     rows = _rows(item(window, "tocList"))

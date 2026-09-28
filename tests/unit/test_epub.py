@@ -69,8 +69,9 @@ def test_relative_image_hrefs_are_normalised(kangpo) -> None:
 
 def test_toc_comes_from_nav_for_epub3(kangpo) -> None:
     assert kangpo.package.nav_href is not None
-    assert len(kangpo.toc) >= 20
-    assert any(entry.title for entry in kangpo.toc)
+    assert len(kangpo.toc) == 8, "four front matter rows, three parts and the afterword"
+    assert len(_rows(kangpo.toc)) == 26
+    assert any(entry.title for entry in _rows(kangpo.toc))
 
 
 def test_toc_comes_from_ncx_for_epub2(binan) -> None:
@@ -79,12 +80,71 @@ def test_toc_comes_from_ncx_for_epub2(binan) -> None:
     assert len(binan.toc) >= 10
 
 
-def test_nested_toc_entries_are_preserved(kangpo, binan) -> None:
-    def depth(entries) -> int:
-        return 1 + max((depth(entry.children) for entry in entries), default=0)
+def _rows(entries) -> list:
+    """Every row of a contents tree, parents before their children."""
+    return [row for entry in entries for row in (entry, *_rows(entry.children))]
 
-    assert depth(kangpo.toc) >= 1
-    assert depth(binan.toc) >= 1
+
+def test_a_flat_contents_is_given_the_hierarchy_of_its_headings(kangpo) -> None:
+    """The nav document lists its 26 rows on one level; the chapters say what they are.
+
+    the EPUB 3 book's navigation document is a single flat ``<ol>`` - every ``<li>`` at the same
+    level - so 第一部分 and the eighteen numbered chapters inside it arrived as siblings
+    and the panel drew the front matter, the three parts and the chapters in one column
+    (缺陷 26).  Nothing about the hierarchy is missing from the book: it is written in
+    the chapter documents, where the front matter and the part openings are ``<h1>``
+    and the numbered chapters are ``<h2>``.
+    """
+    rows = _rows(kangpo.toc)
+    levels = [entry.level for entry in rows]
+    assert len(rows) == 26 and len(rows) == kangpo.section_count - 1
+    assert levels.count(0) == 8, "the four front matter rows, three parts, one afterword"
+    assert levels.count(1) == 18, "every numbered chapter"
+
+    parts = [entry for entry in kangpo.toc if entry.children]
+    assert [entry.title for entry in parts] == [
+        "第一部分 涛动周期论",
+        "第二部分 大类资产配置",
+        "第三部分 先生言谈",
+    ]
+    assert [len(entry.children) for entry in parts] == [8, 5, 5]
+    assert [child.level for child in parts[0].children] == [1] * 8
+    assert parts[0].children[0].title.startswith("01 ")
+
+
+def test_the_volumes_of_the_omnibus_take_the_chapters_inside_them(linqi) -> None:
+    """Three declared rows and 135 sections: each chapter sits under its own volume.
+
+    The NCX names three volumes and nothing else, and the other 131 rows are filled in
+    from the sections themselves (FR-012) - inside the volume they follow rather than
+    beside it, because the omnibus is three books and the map has to say which.  This is
+    the sweep of the omnibus: 31 + 66 + 32, one row per section from the first chapter
+    to 后记.
+    """
+    assert [entry.title for entry in linqi.toc] == [
+        "彼得林奇投资经典全集（共3册）",
+        "目录",
+        "战胜华尔街Beating the Street（珍藏版）",
+        "彼得·林奇教你理财",
+        "彼得·林奇的成功投资（珍藏版）",
+    ]
+    assert [len(entry.children) for entry in linqi.toc] == [0, 0, 31, 66, 32]
+    assert linqi.toc[4].children[-1].title == "后记 马里兰之旅的感悟"
+    assert len(_rows(linqi.toc)) == linqi.section_count - 1, "one row per nameable section"
+
+
+def test_a_flat_contents_whose_text_is_flat_stays_flat(binan) -> None:
+    """Nothing is inferred where nothing was written: the EPUB 2 book's sections are not headings.
+
+    Its NCX lists its rows on one level and its sections open with prose, so reading a
+    hierarchy off the headings finds none and the list the book declared is kept as it
+    is - including the two rows filled in before the NCX's first name (sections 1 and
+    3), which stay on the top level because there is no row before them to own them.
+    """
+    rows = _rows(binan.toc)
+    assert {entry.level for entry in rows} == {0}
+    assert all(not entry.children for entry in rows)
+    assert [entry.title for entry in binan.toc[:2]] == ["币安人生", "免责声明"]
 
 
 @pytest.mark.parametrize(

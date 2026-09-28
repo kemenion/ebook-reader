@@ -1,7 +1,7 @@
 """Build the navigation tree from EPUB3 ``nav.xhtml`` or EPUB2 ``toc.ncx``.
 
-The reference books exercise both paths: 人生财富靠康波 ships a nav document,
-币安人生 only an NCX.  Both parsers walk the XML by local name so that stray or
+The reference books exercise both paths: the EPUB 3 book ships a nav document,
+the EPUB 2 book only an NCX.  Both parsers walk the XML by local name so that stray or
 missing namespaces do not break navigation (FR-010 / FR-011).
 
 Three shapes of publisher sloppiness are absorbed rather than reported, because a
