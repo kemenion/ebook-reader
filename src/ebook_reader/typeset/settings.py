@@ -222,18 +222,21 @@ THEMES: dict[Theme, ThemeColors] = {
         selection="#cdb488",
         text_selection="#8a5a1f",
     ),
-    # Night: a grey that is deep without being black, and type that is grey-white all
-    # the way through - body, headings, panel text.  The old palette put #c8c8c8 ink on
-    # #1c1c1e paper, which reads as light grey on a hole; a few steps up in both keeps
-    # the contrast and takes the strain out of it.
+    # Night: a grey that is deep without being black, and type that is light grey rather
+    # than white.  Two palettes bracket this one: #c8c8c8 ink on #1c1c1e paper read as
+    # light grey on a hole, and #e6e6ea on #27272b overshot the other way - near-white
+    # type on a dark page glares, which is the reader's own account of it ("浅灰，有点偏
+    # 白，但不要太白", 缺陷 28).  #d4d4d4 on #27272b is 10:1, well inside the AAA floor for
+    # body text, with the headings one step louder and the quiet tier two steps down; the
+    # numbers are held by `tests/unit/test_theme_colors.py`, not by eye.
     Theme.DARK: ThemeColors(
         background="#27272b",
-        foreground="#e6e6ea",
-        heading="#f5f5f7",
+        foreground="#d4d4d4",
+        heading="#ececee",
         muted="#9b9ba3",
         link="#7aa2f7",
         panel="#1a1a1e",
-        panel_text="#e6e6ea",
+        panel_text="#d4d4d4",
         band="#202024",
         selection="#3d4b73",
         text_selection="#7aa2f7",

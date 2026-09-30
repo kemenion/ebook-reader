@@ -20,7 +20,7 @@ import time
 import pytest
 from PySide6.QtCore import QSizeF
 
-from ebook_reader.domain.html.kinsoku import NO_LINE_START, NO_LINE_START_ASCII
+from ebook_reader.domain.html.kinsoku import NO_LINE_START, NO_LINE_START_ASCII, WORD_JOINER
 from ebook_reader.typeset import (
     WINDOW_QUANTUM,
     LayoutEngine,
@@ -28,8 +28,10 @@ from ebook_reader.typeset import (
     quantise_offset,
 )
 from ebook_reader.typeset.images import ImageCache
-from ebook_reader.typeset.settings import PageGeometry
+from ebook_reader.typeset.settings import PageGeometry, Theme
 from ebook_reader.typeset.style import StyleSet
+
+from conftest import dominant_colour
 
 PAGE = QSizeF(1000.0, 1346.0)
 
@@ -403,10 +405,53 @@ def test_the_block_lookup_is_the_last_block_at_or_before_an_offset(
     assert samples > 8, f"only sampled {samples} offsets"
 
 
-def test_theme_change_does_not_force_relayout(engine: LayoutEngine, settings) -> None:
-    """Only colours change, so no re-layout should be triggered."""
-    engine.section(0)
-    assert engine.set_settings(settings.with_(theme=settings.theme.DARK)) is False
+def test_a_theme_change_re_inks_the_pages(qapp, kangpo, settings, geometry, largest_section) -> None:
+    """The palette is not a property of the window: it is inside the documents (缺陷 28).
+
+    ``StyleSet`` puts the theme's colours into every char format and a laid-out section
+    keeps its own blocks, so an engine that answered "only colours changed, nothing to
+    relayout" kept the old ink while the paper was re-filled in the new theme.  Measured
+    on the reference book, 米色 → 夜间 left #3b3226 (sepia's brown) on #27272b - 1.4:1,
+    the reader's words as a barely visible stain rather than text.  A theme change is
+    therefore a relayout, and this asserts it the way the reader sees it: the colour the
+    page is actually drawn in.
+    """
+    sepia = settings.with_(theme=Theme.SEPIA)
+    engine = LayoutEngine(kangpo, sepia, geometry)
+    engine.section(largest_section)
+    assert (
+        dominant_colour(engine.render_window(largest_section, 0.0), sepia.colors.background)
+        == sepia.colors.foreground
+    ), "the first paint is not the theme it was asked for"
+
+    dark = sepia.with_(theme=Theme.DARK)
+    assert engine.set_settings(dark) is True, "a theme change left the documents alone"
+    assert (
+        dominant_colour(engine.render_window(largest_section, 0.0), dark.colors.background)
+        == dark.colors.foreground
+    ), "the words kept the old theme's ink on the new theme's paper"
+
+
+def test_turning_avoid_head_tail_off_reaches_the_pages(
+    kangpo, settings, geometry, largest_section
+) -> None:
+    """FR-031: kinsoku is in the text, so the toggle has to reach the laid-out page.
+
+    The joiners are inserted *into* the parsed text, and a laid-out section keeps its own
+    copy of the blocks - so dropping the book's cache alone left this engine handing back
+    the very same document, joiners and all, and the row did nothing until the reader
+    changed section (measured before the fix: same document object, joiner still in it).
+    The drop is the engine's, because "how a setting reaches a document" is what the
+    engine knows; the test walks the toggle the way the controller does.
+    """
+    engine = LayoutEngine(kangpo, settings, geometry)
+    before = engine.section(largest_section)
+    assert any(WORD_JOINER in block.text for block in before.blocks), "kinsoku is on by default"
+
+    assert engine.set_settings(settings.with_(kinsoku=False)) is False, "no relayout is due"
+    after = engine.section(largest_section)
+    assert after is not before, "the documents outlived the text they were built from"
+    assert not any(WORD_JOINER in block.text for block in after.blocks)
 
 
 def test_margin_change_is_a_geometry_change(engine: LayoutEngine, settings) -> None:

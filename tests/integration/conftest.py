@@ -101,6 +101,41 @@ def on_screen(child: QQuickItem) -> bool:
     return left < child.window().width() and left + child.width() > 0
 
 
+def dominant_colour(image, paper: str) -> str:
+    """Colour the ink on a rasterised page was drawn in, given that page's paper.
+
+    Sampled from the bitmap rather than asked of the engine, because the claim being
+    made is the reader-facing one: this is what the page in front of them is made of.
+    Antialiased glyph edges are a mixture of ink and paper, so the *most* common colour
+    that is not the paper is the ink itself.
+    """
+    from collections import Counter
+
+    counts = Counter(
+        image.pixelColor(x, y).name()
+        for y in range(0, image.height(), 2)
+        for x in range(0, image.width(), 2)
+    )
+    for colour, _ in counts.most_common():
+        if colour != paper:
+            return colour
+    raise AssertionError("the page has no ink on it at all")
+
+
+def painted_colours(image, *, step: int = 2) -> set[str]:
+    """Every colour that appears in a rasterised page, sampled on a grid.
+
+    The *set* rather than the dominant colour, for images that carry window chrome as
+    well as text: the claim there is "nothing on this page is drawn in the old theme's
+    ink", which the set answers without having to know which element is the largest.
+    """
+    return {
+        image.pixelColor(x, y).name()
+        for y in range(0, image.height(), step)
+        for x in range(0, image.width(), step)
+    }
+
+
 def click(window, position: tuple[int, int], right: bool = False) -> None:
     """A real click on the window, through Qt's own event delivery.
 

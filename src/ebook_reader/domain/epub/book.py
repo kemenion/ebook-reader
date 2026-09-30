@@ -380,40 +380,48 @@ class EpubBook:
 
     # ----------------------------------------------------------------- content
 
-    def blocks(self, index: int) -> tuple[Block, ...]:
+    def blocks(self, index: int, *, protect: bool = True) -> tuple[Block, ...]:
         """Normalised block list of one section, parsed once and cached.
 
         A section that absorbed the material below its frontispiece reads as one list
         of blocks, which is what makes it one column on screen (ADR-016 / ADR-021):
         images already carry the archive path they resolve to, so the blocks of two
         documents behind different directories concatenate without a second pass.
+
+        *protect* is CJK line-break protection (FR-031) and goes straight to the
+        sanitiser: the joiners it injects are characters in the text, so they belong to
+        the parse rather than to the drawing.  The caches below are keyed by section
+        only, which means the flag in force is part of what they hold - a caller that
+        changes it has to call :meth:`drop_blocks_cache` first, and the layout engine
+        does exactly that (缺陷 29).
         """
         cached = self._block_cache.get(index)
         if cached is None:
             cached = tuple(
                 block
                 for spine_index in self.section_documents(index)
-                for block in self._document_blocks(spine_index)
+                for block in self._document_blocks(spine_index, protect=protect)
             )
             self._block_cache[index] = cached
         return cached
 
-    def _document_blocks(self, spine_index: int) -> tuple[Block, ...]:
+    def _document_blocks(self, spine_index: int, *, protect: bool = True) -> tuple[Block, ...]:
         """Normalised block list of one spine document, parsed once and cached."""
         cached = self._document_cache.get(spine_index)
         if cached is None:
             cached = self._sanitize(
                 self.resource(self.spine[spine_index].href),
                 self._document_base_dir(spine_index),
+                protect=protect,
             )
             self._document_cache[spine_index] = cached
         return cached
 
-    def _sanitize(self, raw: bytes, base_dir: str) -> tuple[Block, ...]:
+    def _sanitize(self, raw: bytes, base_dir: str, *, protect: bool = True) -> tuple[Block, ...]:
         # Imported lazily so that merely opening a book does not pay for it.
         from ..html.sanitizer import sanitize
 
-        return sanitize(raw, base_dir=base_dir, probe=self.image_size)
+        return sanitize(raw, base_dir=base_dir, probe=self.image_size, protect=protect)
 
     def drop_blocks_cache(self) -> None:
         self._block_cache.clear()

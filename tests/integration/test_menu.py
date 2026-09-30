@@ -16,7 +16,19 @@ from PySide6.QtCore import QMetaObject, QObject, Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQuick import QQuickItem
 
-from conftest import at, centre, click, item, open_long_section, pump, set_window_size, visible
+from ebook_reader.typeset.settings import THEMES, Theme
+
+from conftest import (
+    at,
+    centre,
+    click,
+    item,
+    open_long_section,
+    painted_colours,
+    pump,
+    set_window_size,
+    visible,
+)
 
 MENU = "readerMenu"
 
@@ -330,10 +342,17 @@ def test_clicking_a_row_runs_the_operation_it_names(
 def test_a_submenu_opens_on_a_click_and_its_choice_sticks(
     shell, kangpo_path: Path, warnings
 ) -> None:
-    """The value rows are submenus; both hops have to work with the mouse alone."""
+    """The value rows are submenus; both hops have to work with the mouse alone.
+
+    And the choice has to reach the *page*, not just the controller's own field: a theme
+    is baked into every block's char format, so switching it re-lays the documents out
+    (缺陷 28), and the window has to be painted again from them.  What is asserted is the
+    colour on screen after the click - night's paper and night's ink, none of the ink the
+    reader was looking at a moment ago.  Opened on a page of text rather than on the
+    cover, which is one photograph: a page of text is what has a theme's ink on it.
+    """
     _, window, controller = shell
-    assert controller.openBook(str(kangpo_path))
-    pump(240)
+    open_long_section(controller, kangpo_path)
     assert controller.themeName == "light"
 
     open_menu(window)
@@ -348,6 +367,14 @@ def test_a_submenu_opens_on_a_click_and_its_choice_sticks(
     assert controller.themeName == "dark"
     assert not menu(window).property("visible")
     assert not submenu.property("visible")
+
+    night = THEMES[Theme.DARK]
+    painted = painted_colours(controller.viewImage)
+    assert night.background in painted, "the window was not repainted in the new theme"
+    assert night.foreground in painted, "the words are not drawn in night's ink"
+    assert THEMES[Theme.LIGHT].foreground not in painted, (
+        "the old theme's ink is still on the page the reader is looking at"
+    )
     assert warnings == []
 
 

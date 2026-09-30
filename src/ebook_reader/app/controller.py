@@ -1447,16 +1447,20 @@ class ReaderController(QObject):
 
     # --------------------------------------------------------- settings actions
 
-    def _apply_settings(self, changes: dict[str, object], *, needs_reparse: bool = False) -> None:
+    def _apply_settings(self, changes: dict[str, object]) -> None:
+        """Persist a settings change and make the reader's view agree with it.
+
+        Which settings live in the parsed text (kinsoku), which live in the laid-out
+        documents (type, margins, theme) and which merely repaint is knowledge that
+        belongs to the typesetting layer, so the controller hands the new settings over
+        and the engine answers whether the layout is due (缺陷 29).
+        """
         self._settings = self._settings.with_(**changes)
         self._store.set_settings(self._settings)
         self._store.save()
         if self._engine is None:
             self.settingsChanged.emit()
             return
-        if needs_reparse and self._book is not None:
-            # kinsoku is baked into the parsed text, so the block cache must go.
-            self._book.drop_blocks_cache()
         anchor = self._anchor_block()
         self._window_cache.clear()
         self._drop_outline()
@@ -1543,7 +1547,7 @@ class ReaderController(QObject):
     def setKinsoku(self, enabled: bool) -> None:
         if enabled == self._settings.kinsoku:
             return
-        self._apply_settings({"kinsoku": enabled}, needs_reparse=True)
+        self._apply_settings({"kinsoku": enabled})
 
     # --------------------------------------------------------------- bookkeeping
 

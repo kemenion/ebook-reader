@@ -5,8 +5,8 @@ three times.  The paper is always the brightest surface, the *band* the two stri
 are drawn with is one step below the paper, and the chrome beside the book - contents
 column, outline, menus, status bar - is a step further away again.  Night is that same
 order with the lights off, which is what makes it a theme rather than a second design:
-a grey deep enough to read on for an hour, without being a hole, and grey-white type all
-the way through rather than light grey on black.
+a grey deep enough to read on for an hour, without being a hole, and type that is light
+grey rather than white.
 
 A rendering test cannot see any of this.  A palette whose secondary text sits at 2:1
 still paints, it just hurts, and no integration test would notice - so the ratios are
@@ -53,6 +53,18 @@ _WASH_OFF_PAPER_FLOOR = 1.5
 #: wash costs some contrast - that is the price of marking a passage in a reader that has
 #: no glyphs of its own to recolour, and it is paid where it can best be afforded.
 _INK_THROUGH_WASH_FLOOR = 4.5
+
+#: Night's body ink: a light grey, not a white page turned inside out.  The floor is what
+#: keeps the words readable on the deep paper (the 9:1 asserted below); the ceiling is
+#: the reader's own account of it - "浅灰，有点偏白，但不要太白" - because near-white type on
+#: a dark page glares.  Two palettes bracket the window and are named here so the next
+#: person can see what moving it does: #c8c8c8 ink (0.58) was the light-grey-on-a-hole
+#: that started the last revision, and #e6e6ea (0.80) was that revision's overshoot.
+_NIGHT_INK_FLOOR = 0.6
+
+#: See above.  Headings are exempt: they are rare on the page and are meant to be seen
+#: from across the room.
+_NIGHT_INK_CEILING = 0.75
 
 #: ``SELECTION_ALPHA`` as the value that actually reaches the painter: a ``QColor`` is
 #: eight bits per channel, so 0.35 of a colour arrives as 89/255 and the mixes below are
@@ -170,24 +182,31 @@ def test_the_highlighted_row_keeps_its_label_readable() -> None:
         assert colors.selection != colors.panel
 
 
-def test_night_is_a_deep_grey_with_grey_white_type() -> None:
+def test_night_is_a_deep_grey_with_light_grey_type() -> None:
     """What "night" means here: a grey page, and type of no colour at all.
 
     Two reader-facing words are turned into numbers.  *Deep but not too deep* is a
     relative luminance well above black (#000000, 0.0) and far below a mid grey
-    (#808080, 0.216).  *Grey-white type* is a light ink (luminance at least 0.7, i.e.
-    around #d4d4d4 and up) with no hue worth the name; the link is the one colour night
-    is allowed, because a link has to look like one.  The palette this pins away is the
-    old one: #c8c8c8 ink on #1c1c1e paper, light grey on a hole.
+    (#808080, 0.216).  *Light grey type* is a two-sided window rather than a floor: the
+    ink has to be light enough to read on that page, and grey enough not to glare, and
+    the body and the panel text are the same grey (FR-090).  *No hue worth the name* is
+    the saturation bound; the link is the one colour night is allowed, because a link
+    has to look like one.
     """
     colors = THEMES[Theme.DARK]
     assert 0.008 <= _luminance(colors.background) <= 0.06, (
         f"night paper {colors.background} is not a deep grey"
     )
-    for role in ("foreground", "heading", "panel_text"):
+    for role in ("foreground", "panel_text"):
         value = getattr(colors, role)
-        assert _luminance(value) >= 0.7, f"night {role} {value} is not light"
-        assert _saturation(value) <= 0.1, f"night {role} {value} is tinted, not grey-white"
+        assert _NIGHT_INK_FLOOR <= _luminance(value) <= _NIGHT_INK_CEILING, (
+            f"night {role} {value} is not a light grey"
+        )
+        assert _saturation(value) <= 0.1, f"night {role} {value} is tinted, not grey"
+    # The headings are the louder tier, and the only one allowed past the ceiling.
+    assert _luminance(colors.heading) >= _NIGHT_INK_FLOOR + 0.1, "headings are not louder"
+    assert _luminance(colors.heading) > _luminance(colors.foreground)
+    assert _saturation(colors.heading) <= 0.1
     # The quiet tier is the one exception, and only in brightness: it is still grey, and
     # its 3:1 floor on every surface is asserted above.
     assert _saturation(colors.muted) <= 0.1

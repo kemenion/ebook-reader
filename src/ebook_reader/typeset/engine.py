@@ -233,11 +233,13 @@ class LayoutEngine:
         return True
 
     def set_settings(self, settings: TypographySettings) -> bool:
-        """Change typography and/or margins; returns ``True`` if a relayout is due.
+        """Change the theme, typography and/or margins; ``True`` if a relayout is due.
 
         Margins live in the page box rather than in the text formats, so a margin
         change is turned into a geometry change here; the rest of the system only
-        ever has to deal with "geometry changed, redo the layout".
+        ever has to deal with "geometry changed, redo the layout".  The colours of a
+        theme are *not* a window property - they are in the documents - so a theme
+        change is a relayout too (缺陷 28).
         """
         previous = self._settings
         old_margins = (
@@ -252,17 +254,34 @@ class LayoutEngine:
             settings.margin_bottom,
             settings.margin_left,
         )
-        typography_changed = (
+        # Everything that reaches the *documents*: the type, the spacing - and the
+        # colours.  A theme is not a property of the window: ``StyleSet`` writes the
+        # palette into every char format, and a laid-out section keeps its own blocks and
+        # its own document, so treating a theme change as "only colours, nothing to
+        # relayout" left the old ink on the new paper (缺陷 28: 米色 → 夜间 measured
+        # #3b3226 on #27272b, 1.4:1 - the reader's words as a barely visible stain).
+        # A theme change therefore rebuilds the style and drops the section cache,
+        # exactly as a change of type does.
+        document_changed = (
             settings.font_size != previous.font_size
             or settings.font_choice is not previous.font_choice
             or settings.line_height != previous.line_height
             or settings.paragraph_spacing_em != previous.paragraph_spacing_em
             or settings.first_line_indent_em != previous.first_line_indent_em
             or settings.justify != previous.justify
+            or settings.theme is not previous.theme
         )
+        if settings.kinsoku is not previous.kinsoku:
+            # Kinsoku is not a rendering flag either: the joiners are inserted *into* the
+            # parsed text, so changing it means parsing the book again - and every
+            # document built from the old parse has to go with it (缺陷 29: dropping only
+            # the book's copy left this engine handing back the very same document,
+            # joiners and all, so the row looked dead until the reader changed section).
+            self._book.drop_blocks_cache()
+            self._sections.clear()
         self._settings = settings
-        if not typography_changed and old_margins == new_margins:
-            # Only the theme (or kinsoku) changed, so no relayout is required.
+        if not document_changed and old_margins == new_margins:
+            # Nothing that lives in a document changed, and the text is unchanged too.
             return False
         if old_margins != new_margins:
             self._geometry = PageGeometry.from_settings(self._geometry.page_size, settings)
@@ -300,7 +319,10 @@ class LayoutEngine:
 
     def _build_section(self, index: int) -> LaidOutSection:
         started = time.perf_counter()
-        blocks = self._book.blocks(index)
+        # *protect* (CJK line-break protection, FR-031) is part of the parse, not of the
+        # drawing: the joiners are characters in the text.  The engine's cache of what it
+        # built from that text is dropped when the flag changes (set_settings above).
+        blocks = self._book.blocks(index, protect=self._settings.kinsoku)
         document = build_document(blocks, self._style, self._image_cache)
         # The whole section, one column (ADR-016).  There is no pagination pass and
         # no page-break repair, because neither has a meaning when there are no
