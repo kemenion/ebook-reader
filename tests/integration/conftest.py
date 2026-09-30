@@ -112,6 +112,39 @@ def click(window, position: tuple[int, int], right: bool = False) -> None:
     QTest.mouseClick(window, button, Qt.NoModifier, QPoint(*position))
 
 
+def double_click(window, position: tuple[int, int]) -> None:
+    """Two clicks in one place, as Qt delivers them (a press, a release, again)."""
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    QTest.mouseDClick(window, Qt.LeftButton, Qt.NoModifier, QPoint(*position))
+    pump(120)
+
+
+def drag(window, start: tuple[int, int], end: tuple[int, int], steps: int = 5) -> None:
+    """Press at *start*, move to *end* in *steps*, and release there.
+
+    A real drag, for the same reason :func:`click` is a real click: the divider has
+    to be reachable and has to track the pointer while it is held, and a test that
+    called the QML function behind it would prove neither.  The moves are the plain
+    events a pointer sends, not "press, then jump" - a handle that only worked on a
+    single jump would pass a one-step version of this.
+    """
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    QTest.mousePress(window, Qt.LeftButton, Qt.NoModifier, QPoint(*start))
+    for step in range(1, steps + 1):
+        x = int(round(start[0] + (end[0] - start[0]) * step / steps))
+        y = int(round(start[1] + (end[1] - start[1]) * step / steps))
+        QTest.mouseMove(window, QPoint(x, y))
+        pump(20)
+    QTest.mouseRelease(window, Qt.LeftButton, Qt.NoModifier, QPoint(*end))
+    # Long enough for the resize debounce (140 ms) to have re-laid the section out:
+    # the drag ends with one report to Python, and the page box is an assertion.
+    pump(RESIZE_DEBOUNCE_MS + 40)
+
+
 def at(child: QQuickItem, x: float, y: float) -> tuple[int, int]:
     """A point inside *child* in window coordinates, which is what a click needs.
 
@@ -289,9 +322,13 @@ def warnings(qapp) -> list[str]:
     qInstallMessageHandler(previous)
 
 
-@pytest.fixture
-def shell(qapp, tmp_path: Path, warnings):
-    """``Main.qml`` loaded and given a controller, exactly as ``main()`` does it."""
+def build_shell(config_path: Path):
+    """``Main.qml`` loaded and given a controller, exactly as ``main()`` does it.
+
+    A function as well as a fixture, because "the width is remembered" is a statement
+    about two sessions: a test builds one shell, drags, and builds a second one over
+    the same configuration file to see what the next session opens with.
+    """
     from PySide6.QtCore import QUrl
     from PySide6.QtQml import QQmlApplicationEngine
 
@@ -300,12 +337,19 @@ def shell(qapp, tmp_path: Path, warnings):
     from ebook_reader.app.settings_store import SettingsStore
 
     _register()
-    controller = ReaderController(store=SettingsStore(tmp_path / "config.json"))
+    controller = ReaderController(store=SettingsStore(config_path))
     engine = QQmlApplicationEngine()
     engine.load(QUrl.fromLocalFile(str(qml_dir() / "Main.qml")))
     roots = engine.rootObjects()
     assert roots, "Main.qml did not load"
     window = roots[0]
     window.setProperty("ctl", controller)
-    # The engine owns the components; keeping it in the fixture keeps them alive.
+    # The engine owns the components; the caller keeps it alive.
     return engine, window, controller
+
+
+@pytest.fixture
+def shell(qapp, tmp_path: Path, warnings):
+    """``Main.qml`` loaded and given a controller, exactly as ``main()`` does it."""
+    return build_shell(tmp_path / "config.json")
+

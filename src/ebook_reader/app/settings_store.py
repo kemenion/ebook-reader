@@ -26,6 +26,17 @@ _log = logging.getLogger(__name__)
 _VERSION = 1
 _FILE_NAME = "config.json"
 
+#: Bounds of the reader's own side-panel width, in px (FR-078 / ADR-022).
+#:
+#: The window clamps what it can actually afford on top of these (the text column
+#: keeps at least 320 px), but these two are the bounds that survive a restart - and
+#: they are also what protects the layout from a hand-edited `config.json`: a width
+#: of zero or of 100000 must not be able to produce a panel that is invisible or one
+#: that leaves no room for a page.  `Main.qml` mirrors the same two numbers for the
+#: drag itself, and `test_layout.py` pins the mirror in place.
+_PANEL_WIDTH_MIN = 160
+_PANEL_WIDTH_MAX = 480
+
 
 def config_dir() -> Path:
     """Directory for our configuration, honouring ``XDG_CONFIG_HOME``."""
@@ -67,6 +78,7 @@ class SettingsStore:
             "version": _VERSION,
             "settings": {},
             "window": {},
+            "layout": {},
             "books": {},
         }
         self.load()
@@ -105,6 +117,31 @@ class SettingsStore:
             window["x"] = int(x)
             window["y"] = int(y)
         self._data["window"] = window
+
+    def panel_width(self) -> int:
+        """The reader's own side-panel width, or ``0`` for the automatic one (FR-078).
+
+        ``0`` is the answer for a file that has never been dragged, and it is what
+        makes the automatic width (``Main.qml``: a share of the window) the default
+        until the reader says otherwise.  A stored width outside the bounds is
+        clamped rather than rejected: the file is meant to be hand-editable.
+        """
+        value = _safe_int(self._layout().get("panel_width"))
+        if value <= 0:
+            return 0
+        return max(_PANEL_WIDTH_MIN, min(_PANEL_WIDTH_MAX, value))
+
+    def set_panel_width(self, width: int) -> None:
+        """Remember the reader's own panel width; ``0`` forgets it (FR-078).
+
+        Whether the number fits the window it will be shown in is the window's
+        question, not this file's: a width chosen on a large display is kept in full
+        so that it comes back on a large display (ADR-022).
+        """
+        value = int(width)
+        self._layout()["panel_width"] = (
+            0 if value <= 0 else max(_PANEL_WIDTH_MIN, min(_PANEL_WIDTH_MAX, value))
+        )
 
     def book_state(self, book_path: str | os.PathLike[str]) -> BookState:
         entry = self._books().get(self._book_key(book_path))
@@ -153,6 +190,7 @@ class SettingsStore:
             "version": _safe_int(raw.get("version")) or _VERSION,
             "settings": raw.get("settings") if isinstance(raw.get("settings"), dict) else {},
             "window": raw.get("window") if isinstance(raw.get("window"), dict) else {},
+            "layout": raw.get("layout") if isinstance(raw.get("layout"), dict) else {},
             "books": raw.get("books") if isinstance(raw.get("books"), dict) else {},
         }
 
@@ -182,6 +220,14 @@ class SettingsStore:
             books = {}
             self._data["books"] = books
         return books
+
+    def _layout(self) -> dict[str, Any]:
+        """The window-layout section, created on demand (FR-078)."""
+        layout = self._data.get("layout")
+        if not isinstance(layout, dict):
+            layout = {}
+            self._data["layout"] = layout
+        return layout
 
     @staticmethod
     def _book_key(book_path: str | os.PathLike[str]) -> str:

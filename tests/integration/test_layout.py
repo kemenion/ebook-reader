@@ -20,12 +20,21 @@ from PySide6.QtGui import QWindow
 from conftest import (
     RESIZE_DEBOUNCE_MS,
     at,
+    build_shell,
+    centre,
     click,
+    double_click,
+    drag,
     item,
     on_screen,
     pump,
     set_window_size,
     visible,
+)
+from ebook_reader.app.settings_store import (
+    _PANEL_WIDTH_MAX,
+    _PANEL_WIDTH_MIN,
+    SettingsStore,
 )
 
 
@@ -233,6 +242,148 @@ def test_a_narrow_window_keeps_both_columns_usable(
     assert (start, start + width) == (panel, outline.x())
     assert outline.x() + outline.width() == 720
     assert window.property("pageColumnWidth") == width
+
+
+# ------------------------------------------------------------ the reader's width
+
+
+def _divider_grab(window) -> tuple[int, int]:
+    """Where to take hold of the divider: its middle, in window coordinates."""
+    return centre(item(window, "tocDivider"))
+
+
+def test_the_contents_column_can_be_dragged_wider_and_narrower(
+    shell, kangpo_path: Path
+) -> None:
+    """The reader sets the width of the left column by dragging its edge (FR-078).
+
+    Both directions, because each says something the automatic width does not.  Wider
+    is what the automatic width withholds (it stops at 320 px on a wide window);
+    narrower is what a reader who wants the text to have the room asks for.  The
+    pointer's movement *is* the change in width - the edge stays under the pointer -
+    which is why this is a drag and not a jump.
+    """
+    _, window, controller = shell
+    assert controller.openBook(str(kangpo_path))
+    pump(2 * RESIZE_DEBOUNCE_MS)
+    full = float(window.property("width"))
+    automatic = window.property("sidePanelWidth")
+    assert window.property("panelWidth") == 0       # never dragged: the window decides
+    assert visible(window, "tocDivider")
+
+    grab = _divider_grab(window)
+    drag(window, grab, (grab[0] + 80, grab[1]))
+    panel = window.property("sidePanelWidth")
+    assert panel == automatic + 80
+    assert window.property("panelWidth") == panel
+    toc = item(window, "tocPanel")
+    assert (toc.x(), toc.width()) == (0.0, panel)
+    assert _column(window) == (panel, full - panel)
+    # And the page box follows the column, so the text is set for the width the reader
+    # just made (FR-051) - one re-layout, after the divider was let go.
+    assert controller._view_size.width() == window.property("pageColumnWidth")
+
+    # Back the other way: narrower than the automatic width, which no other operation
+    # can produce.
+    grab = _divider_grab(window)
+    drag(window, grab, (grab[0] - 140, grab[1]))
+    panel = window.property("sidePanelWidth")
+    assert panel == automatic - 60
+    assert _column(window) == (panel, full - panel)
+    assert controller._view_size.width() == window.property("pageColumnWidth")
+
+
+def test_a_drag_stops_where_the_window_runs_out(shell, kangpo_path: Path) -> None:
+    """A drag cannot squeeze the page out of the window (FR-078 / ADR-014 ②).
+
+    The bounds are load-bearing rather than cosmetic: they are what keeps the columns
+    tiling the window instead of overlapping it, and what keeps a 160 px floor under a
+    title that still has to wrap legibly.
+    """
+    _, window, controller = shell
+    assert controller.openBook(str(kangpo_path))
+    pump(2 * RESIZE_DEBOUNCE_MS)
+    full = float(window.property("width"))
+
+    # Far past the right edge of the window: the column stops at what the window can
+    # afford, and the text column still has its 320 px.
+    grab = _divider_grab(window)
+    drag(window, grab, (int(full) + 300, grab[1]))
+    allowed = window.property("allowedPanelWidth")
+    assert window.property("sidePanelWidth") == allowed
+    assert _column(window) == (allowed, full - allowed)
+    assert full - allowed >= 320
+
+    # Far past the left edge: the floor, not a vanished column.
+    grab = _divider_grab(window)
+    drag(window, grab, (grab[0] - 400, grab[1]))
+    assert window.property("sidePanelWidth") == 160
+    assert _column(window) == (160.0, full - 160)
+
+
+def test_the_dragged_width_is_what_the_next_session_opens_with(
+    shell, kangpo_path: Path, tmp_path: Path
+) -> None:
+    """The width is a preference, not a session detail (FR-078 / ADR-022).
+
+    Two sessions over one configuration file: the first drags, the second is built the
+    way ``main()`` builds it and opens the same book.
+    """
+    _, window, controller = shell
+    assert controller.openBook(str(kangpo_path))
+    pump(2 * RESIZE_DEBOUNCE_MS)
+    grab = _divider_grab(window)
+    drag(window, grab, (grab[0] - 60, grab[1]))
+    chosen = window.property("sidePanelWidth")
+    assert chosen != window.property("autoPanelWidth")
+
+    # Written once, on release - and what is written is the width that was on screen.
+    assert SettingsStore(tmp_path / "config.json").panel_width() == chosen
+
+    _, next_window, next_controller = build_shell(tmp_path / "config.json")
+    assert next_controller.panelWidth == chosen
+    assert next_window.property("panelWidth") == chosen
+    assert next_controller.openBook(str(kangpo_path))
+    pump(2 * RESIZE_DEBOUNCE_MS)
+    assert item(next_window, "tocPanel").width() == chosen
+    assert (
+        next_window.property("pageColumnWidth")
+        == next_window.property("width") - chosen
+    )
+
+
+def test_a_double_click_on_the_divider_forgets_the_width(
+    shell, kangpo_path: Path, tmp_path: Path
+) -> None:
+    """The way back to the window's own width, in one gesture (FR-078).
+
+    Without it a reader who has dragged once is stuck with a number they chose for one
+    display, and the only way out would be editing the configuration file by hand.
+    """
+    _, window, controller = shell
+    assert controller.openBook(str(kangpo_path))
+    pump(2 * RESIZE_DEBOUNCE_MS)
+    grab = _divider_grab(window)
+    drag(window, grab, (grab[0] - 60, grab[1]))
+    assert window.property("panelWidth") > 0
+
+    double_click(window, _divider_grab(window))
+    assert window.property("panelWidth") == 0
+    assert window.property("sidePanelWidth") == window.property("autoPanelWidth")
+    # Forgotten, not frozen at today's size: the file says "no preference" again.
+    assert SettingsStore(tmp_path / "config.json").panel_width() == 0
+
+
+def test_the_divider_bounds_are_the_ones_the_file_keeps(shell) -> None:
+    """The two numbers live in two places, so they are compared instead of trusted.
+
+    ``Main.qml`` has to clamp for itself while the drag is in flight (Python is not in
+    that loop), and ``settings_store`` clamps again on read and on write - a drift
+    between the two would show up as a width that changes on restart (ADR-022).
+    """
+    _, window, _ = shell
+    assert window.property("minPanelWidth") == _PANEL_WIDTH_MIN
+    assert window.property("maxPanelWidth") == _PANEL_WIDTH_MAX
 
 
 def test_the_settings_drawer_leaves_the_columns_alone(

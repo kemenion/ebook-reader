@@ -12,9 +12,9 @@ Rectangle {
     // load.  Guarded accessors keep every binding safe while `ctl` is still null.
     property var ctl: null
 
-    readonly property color cPanel: ctl ? ctl.panelColor : "#f4f4f4"
+    readonly property color cPanel: ctl ? ctl.panelColor : "#eaeaea"
     readonly property color cPanelText: ctl ? ctl.panelTextColor : "#1b1b1b"
-    readonly property color cMuted: ctl ? ctl.mutedColor : "#8a8a8a"
+    readonly property color cMuted: ctl ? ctl.mutedColor : "#808080"
     readonly property color cAccent: ctl ? ctl.accentColor : "#cfe1ff"
     readonly property real cFontSize: ctl ? ctl.fontSize : 18
     readonly property real cLineHeight: ctl ? ctl.lineHeight : 1.75

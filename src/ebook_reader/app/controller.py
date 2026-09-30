@@ -262,6 +262,18 @@ class ReaderController(QObject):
 
     viewPageSize = Property(QSizeF, _get_view_page_size, notify=viewChanged)
 
+    def _get_top_margin(self) -> float:
+        """Height of the top margin.
+
+        The position bar is drawn across the top of the column with this as its height
+        (FR-074), for the same reason the 下一章 line sits in the bottom margin: at the
+        top of a section the window begins with the margin, so a bar drawn there covers
+        no text, and further down it covers no more than the margin the reader chose.
+        """
+        return self._view_geometry().margin_top
+
+    topMargin = Property(float, _get_top_margin, notify=viewChanged)
+
     def _get_bottom_margin(self) -> float:
         """Height of the bottom margin.
 
@@ -340,10 +352,20 @@ class ReaderController(QObject):
 
     def _section_title_at(self, index: int) -> str:
         """First table-of-contents title pointing at *index*, or ``""``."""
-        for entry, section in self._toc_flat:
-            if section == index and entry.title:
-                return entry.title
-        return ""
+        row = self._row_naming_section(index)
+        return self._toc_flat[row][0].title if row >= 0 else ""
+
+    def _row_naming_section(self, index: int) -> int:
+        """Row of the first contents entry naming *index*, or ``-1`` (FR-012).
+
+        Two callers need a *section* rather than a row: the 下一章 line at the end of a
+        column (FR-074), which names a whole section, and the position bar's fallback
+        where the book's own tree does not reach the reader's place.
+        """
+        for row, (entry, target) in enumerate(self._toc_flat):
+            if target == index and entry.title:
+                return row
+        return -1
 
     def _get_section_title(self) -> str:
         # A section no contents entry names is an untitled part of the book, so the
@@ -443,6 +465,14 @@ class ReaderController(QObject):
 
     mutedColor = Property(QColor, _get_muted_color, notify=settingsChanged)
 
+    def _get_band_color(self) -> QColor:
+        return QColor(self._colors().band)
+
+    #: The surface the two strips drawn on the page share - the position bar and the
+    #: 「下一章」 line (FR-074).  Not the panel colour: the panels are the map beside the
+    #: book, and the strips are the paper (FR-090).
+    bandColor = Property(QColor, _get_band_color, notify=settingsChanged)
+
     def _get_accent_color(self) -> QColor:
         return QColor(self._colors().selection)
 
@@ -524,6 +554,16 @@ class ReaderController(QObject):
 
     settingsVisible = Property(bool, _get_settings_visible, notify=layoutChanged)
 
+    def _get_panel_width(self) -> int:
+        """The reader's own side-panel width, or ``0`` for the automatic one (FR-078).
+
+        Read once by the shell when the controller arrives, so that a dragged width
+        is the width the next session opens with (ADR-022).
+        """
+        return self._store.panel_width()
+
+    panelWidth = Property(int, _get_panel_width, notify=layoutChanged)
+
     def _get_toc_items(self) -> list[dict[str, object]]:
         """The book's own rows, and nothing about the reader.
 
@@ -583,6 +623,77 @@ class ReaderController(QObject):
         section = self._engine.section(section_index)
         block = section.anchor_block(entry.fragment)
         return 0.0 if block is None else section.block_offset(block)
+
+    # ----------------------------------------------------------- position bar
+
+    def _get_position_path(self) -> list[dict[str, object]]:
+        """The levels the reader's place sits under, outermost first (FR-074).
+
+        The bar shows a *path through the book's own tree*, not a file name: one
+        document can carry many contents rows - that is what an anchor is for - so the
+        file is not the unit a reader navigates by, and calling the whole file one
+        name would be wrong everywhere except the top of it.  Taken from the row the
+        highlight is on, so the bar and the contents column cannot disagree.
+        """
+        row = self._position_row()
+        if row < 0:
+            return []
+        return [
+            {
+                "title": self._toc_flat[index][0].title,
+                "level": self._toc_flat[index][0].level,
+            }
+            for index in self._ancestor_rows(row)
+            if self._toc_flat[index][0].title
+        ]
+
+    positionPath = Property(list, _get_position_path, notify=tocRowChanged)
+
+    def _get_position_title(self) -> str:
+        """Name of the place the reader is in (FR-074).
+
+        The contents row they are in; and where the book's own tree does not reach
+        that far - a cover, an imprint page, or above the first anchor of a document
+        its tree names - the section's own name (FR-012), the book's title as the last
+        resort.  A bar that names nothing would be a band of colour across the top of
+        the page.
+        """
+        row = self._position_row()
+        if row >= 0 and self._toc_flat[row][0].title:
+            return self._toc_flat[row][0].title
+        return self._get_section_title()
+
+    positionTitle = Property(str, _get_position_title, notify=tocRowChanged)
+
+    def _position_row(self) -> int:
+        """The contents row the reader's place answers to, or ``-1`` (FR-074).
+
+        The row the highlight is on, and where there is none - the front matter above
+        the first row of a book whose tree starts further in - the row that names the
+        section itself, so the bar still says which part of the book the reader is in.
+        """
+        row = self._toc_row_at(self._section_index, self._scroll_offset)
+        return row if row >= 0 else self._row_naming_section(self._section_index)
+
+    def _ancestor_rows(self, row: int) -> list[int]:
+        """The rows *row* sits under, outermost first (FR-074).
+
+        A row is inside the nearest row above it of a shallower level, which is the
+        shape the contents column draws as an indent (FR-017); the walk stops at the
+        top level, which no row can be inside.  Levels are the book's own numbers,
+        read at build time (ADR-020), so the bar and the column read one structure.
+        """
+        ancestors: list[int] = []
+        level = self._toc_flat[row][0].level
+        for index in range(row - 1, -1, -1):
+            entry = self._toc_flat[index][0]
+            if entry.level < level:
+                ancestors.append(index)
+                level = entry.level
+                if level <= 0:
+                    break
+        ancestors.reverse()
+        return ancestors
 
     # ----------------------------------------------------------------- outline
 
@@ -1236,6 +1347,18 @@ class ReaderController(QObject):
     @Slot(int, int)
     def saveWindow(self, width: int, height: int) -> None:
         self._store.set_window(width, height)
+        self._store.save()
+
+    @Slot(int)
+    def savePanelWidth(self, width: int) -> None:
+        """Persist the side-panel width the reader dragged to (FR-078 / ADR-022).
+
+        Called once per drag, on release - not per mouse move: the width is a
+        preference, and writing the configuration file sixty times a second while the
+        handle is held would be a disk write per event for no gain.  ``0`` means the
+        reader asked for the automatic width back (a double click on the handle).
+        """
+        self._store.set_panel_width(width)
         self._store.save()
 
     @Slot()

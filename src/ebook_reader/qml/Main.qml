@@ -21,7 +21,7 @@ ApplicationWindow {
                                      : "电子书阅读器"
     readonly property color cBg: ctl ? ctl.backgroundColor : "#ffffff"
     readonly property color cFg: ctl ? ctl.textColor : "#1b1b1b"
-    readonly property color cMuted: ctl ? ctl.mutedColor : "#8a8a8a"
+    readonly property color cMuted: ctl ? ctl.mutedColor : "#808080"
     readonly property color cAccent: ctl ? ctl.accentColor : "#cfe1ff"
     readonly property bool cTocOpen: ctl ? ctl.tocVisible : false
     readonly property bool cSettingsOpen: ctl ? ctl.settingsVisible : false
@@ -34,8 +34,35 @@ ApplicationWindow {
     // The table of contents and the outline take real space beside the page;
     // settings is still a drawer that floats over it.
     readonly property int openColumns: (cTocOpen ? 1 : 0) + (cOutlineShown ? 1 : 0)
-    readonly property real sidePanelWidth:
+
+    // The side columns' width, in px.  Two numbers, and the reader owns one of them.
+    //
+    // `panelWidth` is the reader's own width: 0 until they drag the divider, then
+    // whatever they last dragged it to - which is what a saved width is read back
+    // into when the controller arrives (FR-078 / ADR-022).  `autoPanelWidth` is the
+    // width the window picks for itself (ADR-014 ②), and it is what a reader who has
+    // never dragged still gets, so nothing about the layout changes for them.
+    property real panelWidth: 0
+    readonly property real autoPanelWidth:
         Math.max(200, Math.min(320, (width - 440) / Math.max(1, openColumns)))
+    // What a drag may ask for.  The floor is 160 px - a title still wraps legibly,
+    // and `settings_store._PANEL_WIDTH_*` holds the same number for the file - and the
+    // ceiling is 480 px, but the window has the last word: the text column never goes
+    // below the 320 px it already has at the smallest allowed window with both columns
+    // open (720 - 2 × 200), so no drag can squeeze the page out of the window or make
+    // two columns overlap (ADR-014 ②).
+    readonly property real minPanelWidth: 160
+    readonly property real maxPanelWidth: 480
+    readonly property real allowedPanelWidth:
+        Math.max(minPanelWidth,
+                 Math.min(maxPanelWidth, (width - 320) / Math.max(1, openColumns)))
+    // The width the two columns are drawn at: the reader's number when there is one
+    // (clamped to what this window can afford), the automatic one otherwise.  Both
+    // columns read this, so they stay the same width (ADR-014 ②).
+    readonly property real sidePanelWidth:
+        panelWidth > 0
+        ? Math.max(minPanelWidth, Math.min(allowedPanelWidth, panelWidth))
+        : autoPanelWidth
     // One definition of the text column's width, used both by the item that shows
     // the page and by the page box handed to Python, so the two cannot drift apart.
     readonly property real pageColumnWidth:
@@ -77,6 +104,31 @@ ApplicationWindow {
     // is on its way out.
     onCTocOpenChanged: Qt.callLater(function () { window.reportSize() })
     onCOutlineShownChanged: Qt.callLater(function () { window.reportSize() })
+    // A drag is a stream of changes like a window resize, so the page box follows it
+    // the same way: one re-layout, after the handle has been let go (FR-051 / FR-078).
+    onPanelWidthChanged: resizeTimer.restart()
+
+    // The width the reader dragged to, read once as the controller arrives.  The shell
+    // is built before Python injects it and is resized by nothing else, so a plain
+    // assignment is enough here - and it is also what leaves `panelWidth` free for the
+    // drag to write to, which a binding would block.
+    onCtlChanged: {
+        if (ctl && ctl.panelWidth > 0) { window.panelWidth = ctl.panelWidth }
+    }
+
+    // Where a drag asks for a width: clamped to what this window can afford, so that
+    // the divider stops at the edge of the page instead of over it (FR-078).
+    function dragPanelTo(pointerX) {
+        window.panelWidth = Math.max(minPanelWidth, Math.min(allowedPanelWidth, pointerX))
+    }
+
+    // A double click on the divider hands the width back to the window and forgets the
+    // preference entirely - not "pins the width the window happens to have now", which
+    // would freeze today's size into every future session (FR-078).
+    function forgetPanelWidth() {
+        window.panelWidth = 0
+        if (ctl) { ctl.savePanelWidth(0) }
+    }
 
     onClosing: ctl.saveWindow(width, height)
 
@@ -165,6 +217,9 @@ ApplicationWindow {
                 id: readingView
                 anchors.fill: parent
                 ctl: window.ctl
+                // The position bar and the 下一章 line stop short of the scroll bar,
+                // which is drawn over this same edge (FR-076 / FR-074).
+                rightInset: scrollBar.width
             }
 
             // The wheel scrolls the text, and that is all it does - the same gesture
@@ -224,7 +279,7 @@ ApplicationWindow {
                     x: 4
                     width: parent.width - 8
                     radius: width / 2
-                    color: ctl ? ctl.mutedColor : "#8a8a8a"
+                    color: ctl ? ctl.mutedColor : "#808080"
                     opacity: dragArea.pressed ? 0.9 : 0.45
                     height: parent.handleHeight
                     y: ctl && ctl.scrollMax > 0
@@ -272,6 +327,54 @@ ApplicationWindow {
             x: 0
             visible: cTocOpen
             onVisibleChanged: if (visible) revealCurrent()
+        }
+
+        // The contents column's edge, made draggable (FR-078 / ADR-022).  A sibling of
+        // the panels rather than a child of one, because it has to straddle the seam: a
+        // press on the panel side would be a row click to the list, and a press on the
+        // page side a click to the text (FR-062) - the divider is the only thing on
+        // screen whose job is the edge itself.
+        Rectangle {
+            id: tocDivider
+            objectName: "tocDivider"
+            visible: cTocOpen
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            // Wide enough to hit without aiming, and centred on the edge so that half
+            // of it hangs over the text: a reader aiming at the boundary gets it.
+            width: 8
+            x: window.sidePanelWidth - width / 2
+            color: dividerArea.containsMouse || dividerArea.pressed
+                   ? Qt.alpha(cMuted, 0.45)
+                   : "transparent"
+
+            MouseArea {
+                id: dividerArea
+                objectName: "tocDividerArea"
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.SplitHCursor
+                // Where the pointer was, and how wide the column was, when the button
+                // went down.  Both are read through `readingArea`, which does not move:
+                // this item travels with the column it is resizing, so a delta measured
+                // in its own coordinates would feed the column's movement back into the
+                // drag and the edge would shake.
+                property real pressX: 0
+                property real pressWidth: 0
+                onPressed: function (mouse) {
+                    pressX = dividerArea.mapToItem(readingArea, mouse.x, mouse.y).x
+                    pressWidth = window.sidePanelWidth
+                }
+                onPositionChanged: function (mouse) {
+                    if (!pressed) { return }
+                    var moved = dividerArea.mapToItem(readingArea, mouse.x, mouse.y).x - pressX
+                    window.dragPanelTo(pressWidth + moved)
+                }
+                // Once per drag, on release: the width is a preference, and the file is
+                // not to be written on every mouse move (ADR-022).
+                onReleased: if (ctl) { ctl.savePanelWidth(Math.round(window.panelWidth)) }
+                onDoubleClicked: window.forgetPanelWidth()
+            }
         }
 
         OutlinePanel {

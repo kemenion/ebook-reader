@@ -164,42 +164,60 @@ class ThemeColors:
     link: str
     panel: str
     panel_text: str
+    #: The band drawn *on the paper*: the position bar at the top of the text column and
+    #: the 「下一章」 line at its end (FR-074).  It is a surface of the page rather than
+    #: of the chrome, so it takes the paper's ink and muted type, and it is what keeps
+    #: those two strips from being dressed as another column of the map.
+    band: str
     selection: str
     #: Multiplier applied to images so that white-background scans are not
     #: blinding in dark mode (FR-091).
     image_dim: float = 1.0
 
 
+# Three surfaces, one order, in every theme: the paper is the brightest, the band sits
+# one step below it, and the chrome (contents column, outline, menus, status bar) goes
+# one step further away.  Night is the same idea with the lights off rather than a
+# different idea - which is why the dark chrome is *deeper* than the paper and not, as
+# it was before, a raised grey.  The order is what the tests in
+# `tests/unit/test_theme_colors.py` hold the palette to; the exact steps are taste.
 THEMES: dict[Theme, ThemeColors] = {
     Theme.LIGHT: ThemeColors(
         background="#ffffff",
         foreground="#1b1b1b",
         heading="#000000",
-        muted="#8a8a8a",
+        muted="#808080",
         link="#1a5fb4",
-        panel="#f4f4f4",
+        panel="#eaeaea",
         panel_text="#1b1b1b",
+        band="#f6f6f6",
         selection="#cfe1ff",
     ),
     Theme.SEPIA: ThemeColors(
         background="#f5ecd9",
         foreground="#3b3226",
         heading="#241d13",
-        muted="#8d8271",
+        muted="#7f7462",
         link="#8a5a1f",
-        panel="#ede1c8",
+        panel="#e0d2b0",
         panel_text="#3b3226",
-        selection="#dfcfa8",
+        band="#efe4cc",
+        selection="#cdb488",
     ),
+    # Night: a grey that is deep without being black, and type that is grey-white all
+    # the way through - body, headings, panel text.  The old palette put #c8c8c8 ink on
+    # #1c1c1e paper, which reads as light grey on a hole; a few steps up in both keeps
+    # the contrast and takes the strain out of it.
     Theme.DARK: ThemeColors(
-        background="#1c1c1e",
-        foreground="#c8c8c8",
-        heading="#e6e6e6",
-        muted="#787878",
+        background="#27272b",
+        foreground="#e6e6ea",
+        heading="#f5f5f7",
+        muted="#9b9ba3",
         link="#7aa2f7",
-        panel="#242428",
-        panel_text="#c8c8c8",
-        selection="#3a4a6b",
+        panel="#1a1a1e",
+        panel_text="#e6e6ea",
+        band="#202024",
+        selection="#3d4b73",
         image_dim=0.82,
     ),
 }

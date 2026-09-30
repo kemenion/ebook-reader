@@ -5,8 +5,8 @@ does every shortcut Qt is given actually *fire* (a sequence Qt cannot parse is
 registered and never fires - the scroll keys were silently dead that way), does each
 key move the text by the amount the documentation claims, does the wheel move the
 text and nothing else, does the view keep the offset/image relationship that makes
-scrolling cheap (NFR-005), and does the end of a chapter offer the way into the next
-one?
+scrolling cheap (NFR-005), and do both ends of a chapter offer the way out of it - and
+back?
 
 Everything here goes through real events - ``QTest`` key clicks and hand-built wheel
 events - rather than through the controller, because "the key reaches the shortcut"
@@ -483,6 +483,211 @@ def test_the_line_at_the_end_opens_the_next_chapter(shell, kangpo_path: Path) ->
     assert controller.sectionIndex == index + 1
     assert controller.scrollOffset == 0.0
     assert not visible(window, "nextChapterStrip")
+
+
+def test_the_line_at_the_end_is_named_down_the_middle(shell, kangpo_path: Path) -> None:
+    """The way on is named in the middle of the last line (FR-074).
+
+    It used to be flush with the left edge of the column, then with the right one.  The
+    middle is read off the items rather than off a constant: the strip spans the column,
+    and the label inside it is only as wide as its own words and centred in the strip -
+    a full-width box would still *look* off-centre for a title shorter than the column.
+
+    The strip is also where the reader meets the band from below, so the surface is
+    checked here as well as at the top of the column: same band, and not the panel the
+    contents column is drawn in (FR-090).
+    """
+    _, window, controller = shell
+    _open_long_section(controller, kangpo_path)
+    controller.scrollToBottom()
+    pump(200)
+
+    assert visible(window, "nextChapterStrip")
+    strip = item(window, "nextChapterStrip")
+    label = item(window, "nextChapterLabel")
+    bar = item(window, "scrollBar")
+
+    # One band for both ends of the column, and never the map's colour: a strip filled
+    # with the panel colour read as a piece of the contents panel laid under the text.
+    assert strip.property("color") == controller.bandColor
+    assert strip.property("color") != controller.panelColor
+    assert strip.property("color") != controller.backgroundColor
+
+    strip_left, _ = at(strip, 0, 0)
+    strip_right, _ = at(strip, strip.width(), 0)
+    label_left, _ = at(label, 0, 0)
+    label_right, _ = at(label, label.width(), 0)
+
+    # Only as wide as the words it holds ...
+    assert label.width() == pytest.approx(label.property("implicitWidth"), abs=TOLERANCE)
+    # ... and centred on the column: the two gaps beside it are the same one.
+    assert label_left - strip_left == pytest.approx(strip_right - label_right, abs=1.0)
+    # A title too long for the column is still elided before the scroll bar, which is
+    # drawn over this same edge (FR-076) - the label used to run under its handle.
+    bar_left, _ = at(bar, 0, 0)
+    assert visible(window, "scrollBar")
+    assert label_right <= bar_left
+
+    # The words are what a reader aims at, so the click has to land on the line
+    # rather than on the bar drawn beside it (FR-074 / FR-076).
+    index = controller.sectionIndex
+    click(window, at(label, label.width() - 2, label.height() / 2))
+    pump(240)
+    assert controller.sectionIndex == index + 1
+    assert not visible(window, "nextChapterStrip")
+
+
+# ---------------------------------------------------------------- the position bar
+
+
+def test_the_position_bar_names_the_place_and_the_levels_it_sits_under(
+    shell, kangpo_path: Path
+) -> None:
+    """The top of the column says where the reader is, in the book's own tree (FR-074).
+
+    The reference book's contents has 「第一部分 涛动周期论」 with its chapters under it,
+    so one of those chapters is named by two levels: the part it sits in, then its own
+    title.  The part is drawn in the page's muted type and the place itself in the page's
+    own ink and weight - the pair of ideas the contents column uses for its rows - on the
+    *band*, the surface the page steps down to.
+
+    That last word is the point: the strip used to be filled with the panel colour, which
+    is the colour of the map beside the book, so the column carried a strip that said
+    "another panel" (FR-090).  It is a surface of the page now, and the assertion below
+    pins both halves of that - the band it *is* and the panel it is not.
+    """
+    _, window, controller = shell
+    assert controller.openBook(str(kangpo_path))
+    pump(RESIZE_DEBOUNCE_MS + 100)
+    controller.goToSection(6)
+    pump(240)
+
+    assert [level["title"] for level in controller.positionPath] == ["第一部分 涛动周期论"]
+    assert controller.positionTitle == "01 人生财富靠康波——康波中的价格波动"
+
+    view = item(window, "readingView")
+    bar = item(window, "positionBar")
+    crumbs = item(window, "positionCrumbs")
+    path_label = item(window, "positionPathLabel")
+    title_label = item(window, "positionTitleLabel")
+
+    assert visible(window, "positionBar")
+    assert path_label.property("text") == "第一部分 涛动周期论"
+    assert title_label.property("text") == controller.positionTitle
+    # The band, not the panel: the words describe the reader's place in the book, so the
+    # strip belongs to the page, and the two labels sit in the page's two colours.
+    assert bar.property("color") == controller.bandColor
+    assert bar.property("color") != controller.panelColor
+    assert path_label.property("color") == controller.mutedColor
+    assert title_label.property("color") == controller.textColor
+    assert title_label.property("font").bold()
+
+    # Flush with the top of the column, and no deeper than the margin it is drawn in: at
+    # the top of a chapter that band is blank, so the first line stays where the layout
+    # put it (FR-074).
+    _, column_top = at(view, 0, 0)
+    bar_left, bar_top = at(bar, 0, 0)
+    bar_right, bar_bottom = at(bar, bar.width(), bar.height())
+    assert bar_top == column_top
+    assert bar_bottom - bar_top <= controller.topMargin + TOLERANCE
+
+    # Only as wide as the words it holds, centred in the column - and clear of the scroll
+    # bar, which is drawn over this same edge (FR-076).
+    crumbs_left, _ = at(crumbs, 0, 0)
+    crumbs_right, _ = at(crumbs, crumbs.width(), 0)
+    assert crumbs.width() == pytest.approx(crumbs.property("implicitWidth"), abs=TOLERANCE)
+    assert crumbs_left - bar_left == pytest.approx(bar_right - crumbs_right, abs=1.0)
+    assert crumbs_right <= at(item(window, "scrollBar"), 0, 0)[0]
+
+
+def test_the_position_bar_stays_put_while_the_text_scrolls(
+    shell, kangpo_path: Path
+) -> None:
+    """It is a fixture of the column, not the first line of the text (FR-074).
+
+    The bar used to be drawn only at the very top of a section, the one offset where the
+    top margin is blank.  It is now the reader's place at *every* offset: same band, same
+    words, while the text slides under it - and a wheel over it still scrolls, because
+    nothing there takes the gesture (FR-063).
+    """
+    _, window, controller = shell
+    _open_long_section(controller, kangpo_path)
+
+    bar = item(window, "positionBar")
+    title_label = item(window, "positionTitleLabel")
+    title = title_label.property("text")
+    _, top_before = at(bar, 0, 0)
+    assert title
+
+    wheel(window, centre(bar))
+    assert controller.scrollOffset > 0
+
+    _, top_after = at(bar, 0, 0)
+    assert top_after == top_before
+    assert visible(window, "positionBar")
+    # One document, one contents row: scrolling inside it does not change what the place
+    # is called either.
+    assert title_label.property("text") == title
+
+    controller.scrollToBottom()
+    pump(200)
+    _, top_at_the_end = at(bar, 0, 0)
+    assert top_at_the_end == top_before
+    assert visible(window, "positionBar")
+
+
+def test_the_position_bar_follows_the_reader_inside_one_document(
+    shell, binan_path: Path
+) -> None:
+    """Two rows in one file, and the bar names the one the reader is *in* (FR-074).
+
+    The EPUB 2 book's section 8 carries two contents rows - 「幣安上線，2017年7月14日12點」
+    and 「早年歲月」, the second behind an anchor - which is the shape a bar naming the
+    *file* cannot describe: the same page would be called one thing at its top and
+    something else further down.
+    """
+    _, window, controller = shell
+    assert controller.openBook(str(binan_path))
+    pump(RESIZE_DEBOUNCE_MS + 100)
+
+    controller.goToTocRow(7)
+    pump(240)
+    assert controller.sectionIndex == 8
+    assert controller.positionPath == []          # a top-level row has nothing above it
+    assert controller.positionTitle == "幣安上線，2017年7月14日12點"
+    assert item(window, "positionTitleLabel").property("text") == "幣安上線，2017年7月14日12點"
+    # One level, so there is no path above the place and no separator to draw.
+    assert not visible(window, "positionPathLabel")
+    assert not visible(window, "positionSeparator")
+
+    controller.goToTocRow(8)
+    pump(240)
+    assert controller.sectionIndex == 8
+    assert controller.positionTitle == "早年歲月"
+    assert item(window, "positionTitleLabel").property("text") == "早年歲月"
+
+
+def test_the_position_bar_names_the_book_where_its_tree_does_not_reach(
+    shell, kangpo_path: Path
+) -> None:
+    """A cover is named by its book, because no contents row names it (FR-074 / FR-012).
+
+    The front matter is a section the book's own tree does not list, so there is no path
+    to draw - and a bar showing nothing there would be a band of colour over the page.
+    The same fallback covers a chapter no entry names: the section's own first line, and
+    the book's title when even that is silent.
+    """
+    _, window, controller = shell
+    assert controller.openBook(str(kangpo_path))
+    pump(RESIZE_DEBOUNCE_MS + 100)
+    controller.goToSection(0)
+    pump(240)
+
+    assert controller.positionPath == []
+    assert controller.positionTitle == controller.bookTitle
+    assert visible(window, "positionBar")
+    assert item(window, "positionTitleLabel").property("text") == controller.bookTitle
+    assert not visible(window, "positionPathLabel")
 
 
 def test_the_last_chapter_announces_nothing(shell, kangpo_path: Path) -> None:
