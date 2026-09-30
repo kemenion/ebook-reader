@@ -64,6 +64,13 @@ Item {
 
     property alias viewItem: view
 
+    // Where a selected passage's bands are, in the page's own coordinates, and the
+    // wash they are drawn in (FR-070).  Both come from the controller: the bands are
+    // recomputed there on every move of the window as well as on a change of passage,
+    // which is what keeps a highlight on its own line while the text slides under it.
+    readonly property var cSelectionRects: ctl ? ctl.selectionRects : []
+    readonly property color cSelectionColor: ctl ? ctl.selectionColor : "transparent"
+
     PageItem {
         id: view
         // The tests read `pan` and the image back off this item.
@@ -72,6 +79,8 @@ Item {
         background: root.cBg
         pageSize: root.cPageSize
         pan: ctl ? ctl.pan : 0
+        selectionRects: root.cSelectionRects
+        selectionColor: root.cSelectionColor
 
         // `when` keeps the initial null out of the QImage property: assigning null
         // to it is an error in QML, and the view simply shows the background until
@@ -79,6 +88,94 @@ Item {
         Binding on image {
             value: root.cViewImage
             when: root.cViewImage !== null
+        }
+    }
+
+    // The pointer's two gestures on the text (FR-070 / FR-079).  A plain left drag
+    // takes hold of the page and moves it, the way a map follows a finger; holding
+    // Shift turns the same gesture into marking a passage, and letting go copies it.
+    //
+    // Shift rather than a mode to switch into: the reader's hands are already on the
+    // keyboard, the choice is made and unmade inside one gesture, and a plain drag
+    // never has to be guessed at - which matters here, because panning is the gesture
+    // that is used constantly and selecting is the one that is used rarely.
+    //
+    // A left press that never moves is neither a pan nor a marking drag: the controller
+    // reads it as the reader putting a marked passage down again (FR-070) - the one
+    // gesture that is always available for it, and one they can hardly make by accident
+    // while reading.
+    //
+    // Three things about this item are deliberate:
+    //
+    // * It is declared *before* the two strips below, so those stay on top of it and
+    //   the 下一章 line keeps its own click.  The position bar takes no gesture, so a
+    //   drag across it pans the text just as a wheel over it scrolls.
+    // * Nothing is decided here beyond which gesture this is.  Where a point on the
+    //   page falls in the text, and how far the page may move, need the document, the
+    //   margins and the scroll offset at once - all of them the controller's.
+    // * The gestures are tracked by their own flag rather than by `ctl.hasSelection`:
+    //   a Shift drag that starts and ends on one character has no selection to show
+    //   for it, and yet it still must not turn into a pan halfway through.
+    MouseArea {
+        id: pagePointer
+        objectName: "pagePointer"
+        anchors.fill: parent
+        acceptedButtons: Qt.LeftButton
+        // True while the gesture in progress is a Shift drag.
+        property bool marking: false
+        cursorShape: marking ? Qt.IBeamCursor
+                             : (pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor)
+
+        onPressed: function (mouse) {
+            if (!root.ctl) {
+                return
+            }
+            marking = (mouse.modifiers & Qt.ShiftModifier) !== 0
+            if (marking) {
+                root.ctl.beginSelection(mouse.x, mouse.y)
+            } else {
+                root.ctl.beginDrag(mouse.y)
+            }
+        }
+
+        onPositionChanged: function (mouse) {
+            if (!root.ctl || !pressed) {
+                return
+            }
+            if (marking) {
+                root.ctl.extendSelection(mouse.x, mouse.y)
+            } else {
+                root.ctl.dragTo(mouse.y)
+            }
+        }
+
+        onReleased: function (mouse) {
+            if (!root.ctl) {
+                return
+            }
+            if (marking) {
+                // A Shift press that never moved marks nothing yet, so this is what
+                // picks the word under the pointer - and copies the passage either way.
+                root.ctl.endSelection()
+            } else {
+                root.ctl.endDrag()
+            }
+            marking = false
+        }
+
+        onCanceled: function () {
+            if (root.ctl && !marking) {
+                root.ctl.endDrag()
+            }
+            marking = false
+        }
+
+        // A plain double click marks the word under the pointer and copies it: the
+        // shortest way to take one word out of a page.
+        onDoubleClicked: function (mouse) {
+            if (root.ctl && (mouse.modifiers & Qt.ShiftModifier) === 0) {
+                root.ctl.selectWordAt(mouse.x, mouse.y)
+            }
         }
     }
 

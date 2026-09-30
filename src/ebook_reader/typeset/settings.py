@@ -22,6 +22,7 @@ __all__ = [
     "KAI_STACK",
     "PageGeometry",
     "SANS_STACK",
+    "SELECTION_ALPHA",
     "SERIF_STACK",
     "THEMES",
     "Theme",
@@ -170,9 +171,24 @@ class ThemeColors:
     #: those two strips from being dressed as another column of the map.
     band: str
     selection: str
+    #: The wash laid over a selected passage (FR-070).  A *fill*, not a line colour: it
+    #: is drawn over the rasterised page at ``SELECTION_ALPHA``, so it has both to be
+    #: seen against the paper and to leave the body ink readable through it - the two
+    #: floors `tests/unit/test_theme_colors.py` holds it to.  Sepia's value is nominally
+    #: its link colour; it is written out because a fill and a line are chosen for
+    #: different jobs and either is free to move.
+    text_selection: str
     #: Multiplier applied to images so that white-background scans are not
     #: blinding in dark mode (FR-091).
     image_dim: float = 1.0
+
+
+#: Opacity of the wash over a selected passage (FR-070).  One number for all three
+#: themes: whether a passage is selected should read equally strongly whatever the
+#: reader is reading on, and what the wash has to satisfy - visible on the paper, with
+#: the body ink still legible through it - is pinned per theme in
+#: `tests/unit/test_theme_colors.py` rather than tuned by eye here.
+SELECTION_ALPHA = 0.35
 
 
 # Three surfaces, one order, in every theme: the paper is the brightest, the band sits
@@ -192,6 +208,7 @@ THEMES: dict[Theme, ThemeColors] = {
         panel_text="#1b1b1b",
         band="#f6f6f6",
         selection="#cfe1ff",
+        text_selection="#3b6fd0",
     ),
     Theme.SEPIA: ThemeColors(
         background="#f5ecd9",
@@ -203,6 +220,7 @@ THEMES: dict[Theme, ThemeColors] = {
         panel_text="#3b3226",
         band="#efe4cc",
         selection="#cdb488",
+        text_selection="#8a5a1f",
     ),
     # Night: a grey that is deep without being black, and type that is grey-white all
     # the way through - body, headings, panel text.  The old palette put #c8c8c8 ink on
@@ -218,6 +236,7 @@ THEMES: dict[Theme, ThemeColors] = {
         panel_text="#e6e6ea",
         band="#202024",
         selection="#3d4b73",
+        text_selection="#7aa2f7",
         image_dim=0.82,
     ),
 }
@@ -264,6 +283,17 @@ class TypographySettings:
 
     def selection_color(self) -> QColor:
         return QColor(self.colors.selection)
+
+    def text_selection_color(self) -> QColor:
+        """The wash over a selected passage, ready to draw (FR-070).
+
+        The alpha lives here rather than in the table because it is one decision for
+        all three themes; the hue is the theme's, because the wash has to sit on that
+        theme's paper.
+        """
+        color = QColor(self.colors.text_selection)
+        color.setAlphaF(SELECTION_ALPHA)
+        return color
 
     # --------------------------------------------------------------- mutation
 

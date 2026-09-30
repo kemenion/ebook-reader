@@ -13,9 +13,10 @@ from pathlib import Path
 
 import pytest
 from PySide6.QtCore import QMetaObject, QObject, Qt
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtQuick import QQuickItem
 
-from conftest import at, centre, click, item, pump, set_window_size, visible
+from conftest import at, centre, click, item, open_long_section, pump, set_window_size, visible
 
 MENU = "readerMenu"
 
@@ -26,6 +27,7 @@ ROWS = (
     "目录",
     "本节大纲",
     "设置",
+    "复制",
     "向上滚动",
     "向下滚动",
     "上滚一屏",
@@ -235,6 +237,7 @@ def test_the_menu_shows_which_columns_are_open(
     assert not row(window, "目录").property("enabled")
     assert not row(window, "向下滚动").property("enabled")
     assert not row(window, "设置").property("enabled")
+    assert not row(window, "复制").property("enabled")     # nothing marked either
     assert bool(row(window, "打开文件…").property("enabled"))    # always available
 
     assert controller.openBook(str(kangpo_path))
@@ -262,6 +265,41 @@ def test_the_menu_knows_whether_the_book_has_a_table_of_contents(
     assert controller.openBook(str(kangpo_path))
     assert controller.tocAvailable
     assert bool(row(window, "目录").property("enabled"))
+
+
+def test_the_copy_row_is_greyed_until_there_is_something_to_copy(
+    shell, kangpo_path: Path
+) -> None:
+    """The row that carries the page's own gesture, in both of its states (FR-070 / FR-071).
+
+    A row that is always enabled invites the reader to click it and watch nothing happen,
+    so it is greyed until a passage is marked - a book alone is not a passage - and then
+    it does what its name says: the same thing ``Ctrl+C`` does, on the passage that is
+    already on the page.
+    """
+    _, window, controller = shell
+    assert not row(window, "复制").property("enabled")     # no book, so nothing to mark
+
+    # A section with room to scroll in, so two points six lines apart are two positions.
+    open_long_section(controller, kangpo_path)
+    assert not row(window, "复制").property("enabled")     # a book is not a passage
+
+    # A passage without the clipboard: the row has to be the thing that copies it.
+    page = item(window, "pageView")
+    x = int(page.width() / 2)
+    controller.beginSelection(x, int(6 * controller.lineStep))
+    controller.extendSelection(x, int(12 * controller.lineStep))
+    assert controller.hasSelection
+    assert bool(row(window, "复制").property("enabled"))
+
+    clipboard = QGuiApplication.clipboard()
+    clipboard.setText("别的东西")
+    open_menu(window)
+    click(window, centre(row(window, "复制")))
+    pump(200)
+
+    assert clipboard.text() == controller.selectedText
+    assert not menu(window).property("visible")
 
 
 

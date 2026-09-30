@@ -31,6 +31,27 @@ Rectangle {
     readonly property string cError: ctl ? ctl.errorMessage : ""
     readonly property real cProgress: ctl ? ctl.progress : 0
 
+    // A passing word from the controller - 已复制 12 字 once a marked passage reaches
+    // the clipboard (FR-070) - which takes the diagnostics' place for a few seconds.
+    // The copy happens by itself, out of sight, so the answer to "did that work?" has
+    // to appear somewhere the reader is already looking; the diagnostics are the
+    // control they can do without while it is shown.
+    property string cMessage: ""
+
+    Connections {
+        target: root.ctl
+        function onStatusMessage(text) {
+            root.cMessage = text
+            messageTimer.restart()
+        }
+    }
+
+    Timer {
+        id: messageTimer
+        interval: 2400
+        onTriggered: root.cMessage = ""
+    }
+
     height: 34
     color: cPanel
 
@@ -147,11 +168,14 @@ Rectangle {
     }
 
     Text {
+        objectName: "messageLabel"
         anchors.right: parent.right
         anchors.rightMargin: 16
         anchors.verticalCenter: parent.verticalCenter
         width: Math.min(parent.width * 0.4, implicitWidth)
-        text: cError.length > 0 ? cError : cDiagnostics
+        text: cError.length > 0 ? cError
+              : cMessage.length > 0 ? cMessage
+              : cDiagnostics
         color: cError.length > 0 ? "#c0392b" : cMuted
         font.pixelSize: 12
         elide: Text.ElideRight

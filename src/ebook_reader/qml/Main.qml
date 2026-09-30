@@ -476,6 +476,10 @@ ApplicationWindow {
     Shortcut { sequence: "O"; onActivated: ctl && ctl.toggleOutline() }
     Shortcut { sequence: "S"; onActivated: ctl && ctl.toggleSettings() }
     Shortcut { sequence: "Escape"; onActivated: ctl && ctl.closePanels() }
+    // The passage is copied the moment the gesture that marked it ends; this is the way
+    // to put it back on the clipboard after something else has taken it over - the
+    // passage stays marked until the reader puts it down with a click (FR-070).
+    Shortcut { sequence: "Ctrl+C"; onActivated: ctl && ctl.copySelection() }
     Shortcut { sequence: "Ctrl+O"; onActivated: fileDialog.open() }
     Shortcut { sequence: "Ctrl+Q"; onActivated: Qt.quit() }
     Shortcut { sequence: "Ctrl++"; onActivated: ctl && ctl.increaseFont() }

@@ -19,8 +19,8 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 
-from PySide6.QtCore import Property, QObject, QSizeF, Signal, Slot
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtCore import Property, QObject, QRectF, QSizeF, Signal, Slot
+from PySide6.QtGui import QColor, QGuiApplication, QImage, QTextDocument
 
 from ..domain import BookError, EpubBook
 from ..domain.models import TocEntry
@@ -32,6 +32,7 @@ from ..typeset import (
     TypographySettings,
     quantise_offset,
 )
+from ..typeset.selection import position_at, selected_text, selection_rects, word_range
 from ..typeset.settings import PageGeometry
 from .settings_store import BookState, SettingsStore
 
@@ -139,7 +140,14 @@ def _build_outline(section: LaidOutSection) -> list[dict[str, object]]:
 
 
 class ReaderController(QObject):
-    """State machine behind the QML user interface."""
+    """State machine behind the QML user interface.
+
+    The two gestures that arrive from the page itself live here rather than in QML: a
+    plain drag takes hold of the page and moves it (FR-079), and a Shift drag marks a
+    passage and copies it on release (FR-070).  What both need - which character a point
+    on the page is, and where a passage's bands are drawn - needs the document, the
+    margins and the scroll offset at once, and that is the controller's to know.
+    """
 
     viewChanged = Signal()
     layoutChanged = Signal()
@@ -149,6 +157,9 @@ class ReaderController(QObject):
     tocRowChanged = Signal()
     errorOccurred = Signal(str)
     statusMessage = Signal(str)
+    #: The bands a selection is drawn in are part of the page, so this is announced both
+    #: when the passage changes and when the window moves (FR-070).
+    selectionChanged = Signal()
 
     def __init__(self, parent: QObject | None = None, store: SettingsStore | None = None) -> None:
         super().__init__(parent)
@@ -162,6 +173,27 @@ class ReaderController(QObject):
         self._view_size = QSizeF(900.0, 1300.0)
         self._device_ratio = 1.0
         self._toc_flat: list[tuple[TocEntry, int]] = []
+        #: The selection, as two character positions in the current section's document
+        #: (FR-070).  Positions rather than pixels, because the passage outlives the
+        #: window it was chosen in: change the type size and the same characters are
+        #: still selected, drawn where they now are.
+        self._sel_anchor: int | None = None
+        self._sel_start = 0
+        self._sel_end = 0
+        #: Where a hand-pan drag took hold: the pointer's y and the offset it started
+        #: from, so the page follows the pointer's *distance* rather than a sum of
+        #: deltas that clamps and unclamps at either end of the section (FR-079).
+        self._drag_origin: tuple[float, float] | None = None
+        #: Whether that drag moved the pointer at all.  A press and release in one place
+        #: is a click, and a click is how the reader puts a marked passage down again
+        #: (FR-070) - so the difference matters, and a distance of zero is a poor way to
+        #: tell it: a drag into the clamp at either end of a section moves nothing either.
+        self._drag_moved = False
+        #: Whether a double click just took the word under the pointer.  Qt delivers one as
+        #: press, release, press, doubleClick, release: the last of those has nothing
+        #: between it and the press before it, so without this flag it would be read as a
+        #: plain click and would put the word straight back down (FR-070).
+        self._word_taken = False
         #: The row the panel last highlighted, so that scrolling inside one document
         #: only signals a change when it actually crosses a row (FR-013).
         self._toc_row = -1
@@ -483,6 +515,12 @@ class ReaderController(QObject):
 
     linkColor = Property(QColor, _get_link_color, notify=settingsChanged)
 
+    def _get_selection_color(self) -> QColor:
+        """The wash drawn over a selected passage, already carrying its alpha (FR-070)."""
+        return self._settings.text_selection_color()
+
+    selectionColor = Property(QColor, _get_selection_color, notify=settingsChanged)
+
     # ---------------------------------------------------------------- settings
 
     def _get_font_size(self) -> float:
@@ -530,6 +568,50 @@ class ReaderController(QObject):
         return int(self._settings.margin_left)
 
     margin = Property(int, _get_margin, notify=settingsChanged)
+
+    # ---------------------------------------------------------------- selection
+
+    def _get_has_selection(self) -> bool:
+        return self._sel_end > self._sel_start
+
+    #: Whether there is a passage to copy (FR-070) - what greys out the menu's 复制 row.
+    hasSelection = Property(bool, _get_has_selection, notify=selectionChanged)
+
+    def _get_selected_text(self) -> str:
+        """The selected passage as plain text: what a copy hands to the clipboard.
+
+        Read through the document rather than kept as a string, so that a passage
+        selected before a re-layout still reads back the same *characters* (FR-070).
+        Paragraph breaks become newlines and the layout-only word joiners go (FR-109).
+        """
+        document = self._document()
+        if document is None or not self.hasSelection:
+            return ""
+        return selected_text(document, self._sel_start, self._sel_end)
+
+    selectedText = Property(str, _get_selected_text, notify=selectionChanged)
+
+    def _get_selection_rects(self) -> list[QRectF]:
+        """The bands the selected passage covers, on the page, top to bottom (FR-070).
+
+        Deliberately in *page* coordinates - the space the window image is rasterised in
+        - rather than in the document's: the controller is the only thing that knows
+        where the document's origin sits under the margins and the scroll offset, and
+        ``PageItem`` then draws them through the very transform it draws the image with.
+        Moving the window therefore moves them, which is why this is announced on
+        ``selectionChanged`` as well as on a change of passage.
+        """
+        document = self._document()
+        if document is None or not self.hasSelection:
+            return []
+        origin = self._view_geometry().content_origin
+        top = origin.y() - self._scroll_offset
+        return [
+            QRectF(rect.x() + origin.x(), rect.y() + top, rect.width(), rect.height())
+            for rect in selection_rects(document, self._sel_start, self._sel_end)
+        ]
+
+    selectionRects = Property(list, _get_selection_rects, notify=selectionChanged)
 
     # ------------------------------------------------------------------ panels
 
@@ -816,6 +898,15 @@ class ReaderController(QObject):
         self._toc_visible = False
         self._outline_visible = False
         self._drop_outline()
+        # A passage belongs to the document it was chosen in (FR-070), so the mark goes
+        # with the book - and QML has to be *told*, because what it draws from the mark
+        # is read on `selectionChanged`: without this the item would go on washing bands
+        # over a document that no longer exists.  The clipboard keeps what the reader
+        # copied; putting the mark down has never been the same as undoing the copy.
+        self._sel_anchor = None
+        self._sel_start = 0
+        self._sel_end = 0
+        self.selectionChanged.emit()
         # There is no window any more.  The signal is not decoration: the outline
         # panel derives its availability from the section, so without it the binding
         # that decides whether the column exists keeps its old answer and the column
@@ -962,6 +1053,185 @@ class ReaderController(QObject):
         """Down to the bottom of the current section (the menu's 篇末 row)."""
         self._set_offset(self.scrollMax)
 
+    # ---------------------------------------------------------------- the hand
+
+    @Slot(float)
+    def beginDrag(self, y: float) -> None:
+        """Take hold of the page, for a hand-pan drag (FR-079).
+
+        Only ``y``: the text runs as one vertical column, so the pointer's horizontal
+        position says nothing about where the page should be.
+        """
+        self._drag_origin = (float(y), self._scroll_offset)
+        self._drag_moved = False
+        # A gesture is starting, so whatever the last one left behind is not this one's.
+        # A double click's release is the case: it must not be told apart from a click by
+        # a flag an earlier gesture set (FR-070).
+        self._word_taken = False
+
+    @Slot(float)
+    def dragTo(self, y: float) -> None:
+        """Move the page so the text stays under the pointer (FR-079).
+
+        The offset is measured from where the drag *started*, not from the last move: a
+        chain of deltas would accumulate every rounding error along the way, and it would
+        walk into the clamp at either end of the section and stay there - the reader
+        would have to drag back the distance they overshot before the page moved again.
+        A distance from the anchor can do neither.
+
+        The text follows the pointer, so dragging *down* moves the window back *up* the
+        section: hence the minus sign.
+        """
+        if self._drag_origin is None:
+            return
+        self._drag_moved = True
+        origin_y, origin_offset = self._drag_origin
+        self._set_offset(origin_offset - (float(y) - origin_y))
+
+    @Slot()
+    def endDrag(self) -> None:
+        """Let go of the page; the offset it reached is the place the reader is at (FR-079).
+
+        A press and release that never moved is not a pan but a click, and a click is how
+        the reader puts a marked passage down: the highlight goes, the clipboard keeps its
+        text - it was copied when the marking gesture ended, and dismissing the mark is not
+        the same as undoing the copy (FR-070).
+
+        A double click is the exception, and it arrives looking exactly like a click: its
+        release follows its own press with nothing in between.  The word it took is only
+        there because of that press, so the release may not take it away again - which is
+        what the flag ``selectWordAt`` leaves behind is for.
+        """
+        moved, word_taken = self._drag_moved, self._word_taken
+        self._drag_origin = None
+        self._drag_moved = False
+        self._word_taken = False
+        if not moved and not word_taken:
+            self.clearSelection()
+
+    @Slot(float, float)
+    def beginSelection(self, x: float, y: float) -> None:
+        """Start a passage at a point on the page, on a Shift press (FR-070).
+
+        Both ends start on the character under the pointer, so a Shift *click* that
+        never moves selects nothing yet; the word under the pointer is picked up on
+        release (:meth:`endSelection`).  That is what tells a click from a drag without
+        a timer, and it is also why one gesture can be both.
+        """
+        position = self._position_at_page(x, y)
+        self._sel_anchor = position
+        self._sel_start = position
+        self._sel_end = position
+        self.selectionChanged.emit()
+
+    @Slot(float, float)
+    def extendSelection(self, x: float, y: float) -> None:
+        """Drag the far end of the passage to a point on the page (FR-070).
+
+        The end being dragged may pass the anchor - selecting upwards is the same
+        gesture - so the two positions are kept sorted rather than assumed ordered, and
+        what is highlighted never depends on which way the reader dragged.
+        """
+        if self._sel_anchor is None:
+            return
+        start, end = sorted((self._sel_anchor, self._position_at_page(x, y)))
+        if (start, end) == (self._sel_start, self._sel_end):
+            return
+        self._sel_start, self._sel_end = start, end
+        self.selectionChanged.emit()
+
+    @Slot()
+    def endSelection(self) -> None:
+        """Finish the gesture: a click picks the word, and the passage is copied (FR-070).
+
+        The copy happens here, on release, rather than on a further key: the reader
+        asked for this passage and there is no editor to paste into, so making them
+        press something else would be asking for the same thing twice.
+        """
+        if self._sel_anchor is None:
+            return
+        if not self.hasSelection:
+            self._select_word(self._sel_anchor)
+        self._sel_anchor = None
+        self.copySelection()
+
+    @Slot(float, float)
+    def selectWordAt(self, x: float, y: float) -> None:
+        """Select the word under a point and copy it - a double click (FR-070).
+
+        The flag it leaves behind is read by :meth:`endDrag`: Qt sends this on the *press*
+        of the second click of a double click, and the release that follows arrives
+        indistinguishable from a plain click (see that method).
+        """
+        self._sel_anchor = None
+        self._word_taken = True
+        self._select_word(self._position_at_page(x, y))
+        self.copySelection()
+
+    @Slot()
+    def clearSelection(self) -> None:
+        """Drop the passage, leaving the page as it was (FR-070)."""
+        self._sel_anchor = None
+        if not self.hasSelection:
+            return
+        self._sel_start = 0
+        self._sel_end = 0
+        self.selectionChanged.emit()
+
+    @Slot()
+    def copySelection(self) -> None:
+        """Put the selected passage on the system clipboard, and say so (FR-070).
+
+        ``QGuiApplication.clipboard()`` rather than a ``TextEdit`` hidden in the item
+        tree: the passage lives here, and a widget that existed only to hold the
+        clipboard would be a second copy of it - in another coordinate system, with its
+        own idea of what is selected.
+
+        An empty passage is *not* copied, so ``Ctrl+C`` with nothing selected cannot
+        take away whatever the reader had copied somewhere else.
+        """
+        text = self.selectedText
+        if not text:
+            return
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is None:  # a platform plugin without one; not worth an error
+            return
+        clipboard.setText(text)
+        self.statusMessage.emit(f"已复制 {len(text)} 字")
+
+    def _select_word(self, position: int) -> None:
+        """Select the word around *position*; an empty word changes nothing."""
+        document = self._document()
+        if document is None:
+            return
+        start, end = word_range(document, position)
+        if start >= end:  # between two words, or out in the margin
+            return
+        self._sel_start, self._sel_end = start, end
+        self.selectionChanged.emit()
+
+    def _document(self) -> QTextDocument | None:
+        """The document of the section on screen, or ``None`` with no book open."""
+        section = self._current_section()
+        return section.document if section is not None else None
+
+    def _position_at_page(self, x: float, y: float) -> int:
+        """Turn a point on the page - what a MouseArea reports - into a position.
+
+        The inverse of the mapping ``selectionRects`` applies: the content margin comes
+        off and the scroll offset goes back on, because a point's place *on the page*
+        changes as the reader scrolls while its place *in the document* does not.
+        """
+        document = self._document()
+        if document is None:
+            return 0
+        origin = self._view_geometry().content_origin
+        return position_at(
+            document,
+            float(x) - origin.x(),
+            float(y) + self._scroll_offset - origin.y(),
+        )
+
     # ----------------------------------------------------------------- jumping
 
     @Slot(int)
@@ -1080,12 +1350,18 @@ class ReaderController(QObject):
 
     @Slot()
     def closePanels(self) -> None:
-        """Close every panel at once (``Esc``)."""
+        """Close every panel at once (``Esc``).
+
+        The one key that puts the window back the way it was: the panels go, and so does
+        a selected passage - both are something the reader asked for and neither is part
+        of the book (FR-070).  The clipboard keeps what was already copied.
+        """
         if self._toc_visible or self._settings_visible or self._outline_visible:
             self._toc_visible = False
             self._settings_visible = False
             self._outline_visible = False
             self.layoutChanged.emit()
+        self.clearSelection()
 
     # ------------------------------------------------------------- view changes
 
@@ -1293,7 +1569,17 @@ class ReaderController(QObject):
             stats = self._engine.last_stats
             self._last_section_ms = stats.build_ms if stats else 0.0
             self._engine.prefetch(self._section_index, self._scroll_offset)
+        if set_section:
+            # A passage belongs to the document it was chosen in (FR-070).  Dropped
+            # without a word - and without touching the clipboard, which holds what the
+            # reader already copied.
+            self._sel_anchor = None
+            self._sel_start = 0
+            self._sel_end = 0
         self.viewChanged.emit()
+        # The bands of a selection are drawn *on the page*, so moving the window moves
+        # them: QML rebinds `selectionRects` from this signal too (FR-070).
+        self.selectionChanged.emit()
         # Which row the panel highlights is a property of the place, not of the
         # document - a document can hold several rows (FR-013).  It is announced on a
         # signal of its own, so that moving it cannot republish the rows: while the two

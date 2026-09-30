@@ -29,6 +29,7 @@ from conftest import (
     click,
     item,
     on_screen,
+    open_long_section,
     press,
     pump,
     shortcut_keys,
@@ -62,6 +63,7 @@ DOCUMENTED = frozenset(
         "O",
         "S",
         "Esc",
+        "Ctrl+C",
         "Ctrl+O",
         "Ctrl+Q",
         "Ctrl++",
@@ -70,26 +72,6 @@ DOCUMENTED = frozenset(
         "F11",
     }
 )
-
-
-def _open_long_section(controller, path: Path, *, screens: float = 2.0) -> int:
-    """Open *path* on a section with room to scroll, and return its index.
-
-    Deliberately *not* section 0: both books open on a cover that fits on one screen,
-    where every scroll assertion would hold trivially.
-    """
-    assert controller.openBook(str(path))
-    pump(240)
-    for index in range(controller.sectionCount):
-        controller.goToSection(index)
-        if controller.scrollMax > screens * controller.viewportHeight:
-            break
-    else:
-        pytest.skip("reference book has no section long enough to scroll in")
-    controller.scrollToTop()
-    pump(120)
-    assert controller.scrollOffset == 0.0
-    return index
 
 
 def _page_step(controller) -> float:
@@ -140,7 +122,7 @@ def test_every_registered_sequence_is_one_qt_can_parse(shell) -> None:
 
 def test_the_arrow_keys_move_one_line(shell, kangpo_path: Path) -> None:
     _, window, controller = shell
-    _open_long_section(controller, kangpo_path)
+    open_long_section(controller, kangpo_path)
 
     press(window, "Down")
     assert controller.scrollOffset == pytest.approx(controller.lineStep, abs=TOLERANCE)
@@ -155,7 +137,7 @@ def test_the_arrow_keys_move_one_line(shell, kangpo_path: Path) -> None:
 def test_the_page_keys_move_one_screen(shell, kangpo_path: Path) -> None:
     """`PgDown`, `Space` and `Right` are one action; so are the three keys up."""
     _, window, controller = shell
-    _open_long_section(controller, kangpo_path)
+    open_long_section(controller, kangpo_path)
     step = _page_step(controller)
 
     for key in ("PgDown", "Space", "Right"):
@@ -174,7 +156,7 @@ def test_the_page_keys_move_one_screen(shell, kangpo_path: Path) -> None:
 def test_the_ends_of_the_chapter_are_reachable(shell, kangpo_path: Path) -> None:
     """`End` stops where the last line does, and `Home` comes back (FR-074)."""
     _, window, controller = shell
-    index = _open_long_section(controller, kangpo_path)
+    index = open_long_section(controller, kangpo_path)
 
     press(window, "End")
     assert controller.scrollOffset == pytest.approx(controller.scrollMax, abs=TOLERANCE)
@@ -193,7 +175,7 @@ def test_the_ends_of_the_chapter_are_reachable(shell, kangpo_path: Path) -> None
 def test_the_bracket_keys_step_one_chapter(shell, kangpo_path: Path) -> None:
     """`]` and `[` change chapter: the reader lands at the start of the next one."""
     _, window, controller = shell
-    index = _open_long_section(controller, kangpo_path)
+    index = open_long_section(controller, kangpo_path)
     assert index > 0, "this test needs a chapter before the one it starts in"
 
     press(window, "]")
@@ -255,7 +237,7 @@ def test_the_panel_keys_toggle_the_columns(
 ) -> None:
     """`T`, `O`, `S` and `Esc`, through real key events (FR-013 / FR-019)."""
     _, window, controller = shell
-    _open_long_section(controller, kangpo_path)
+    open_long_section(controller, kangpo_path)
     assert controller.tocVisible          # the map comes up with the book (FR-013)
 
     press(window, "T")
@@ -296,7 +278,7 @@ def test_the_settings_drawer_yields_the_right_hand_column(
 ) -> None:
     """One column on the right, so the drawer closes the outline, not the map."""
     _, window, controller = shell
-    _open_long_section(controller, kangpo_path)
+    open_long_section(controller, kangpo_path)
     controller.goToSection(heading_section)
     pump(240)
 
@@ -318,7 +300,7 @@ def test_the_settings_drawer_yields_the_right_hand_column(
 def test_the_wheel_scrolls_the_text_by_the_wheel_step(shell, kangpo_path: Path) -> None:
     """One notch is three lines, down or up, whichever way it is turned (FR-073)."""
     _, window, controller = shell
-    _open_long_section(controller, kangpo_path)
+    open_long_section(controller, kangpo_path)
     page = item(window, "pageArea")
     assert controller.wheelStep == pytest.approx(3 * controller.lineStep, abs=TOLERANCE)
 
@@ -338,7 +320,7 @@ def test_a_smooth_wheel_scrolls_by_its_own_pixels(shell, kangpo_path: Path) -> N
     exactly where it was - and this is the shape the reader's own hardware sends.
     """
     _, window, controller = shell
-    _open_long_section(controller, kangpo_path)
+    open_long_section(controller, kangpo_path)
     page = item(window, "pageArea")
     position = at(page, page.width() / 2, 400)
 
@@ -355,7 +337,7 @@ def test_a_smooth_wheel_scrolls_by_its_own_pixels(shell, kangpo_path: Path) -> N
 def test_a_partial_notch_scrolls_by_its_own_fraction(shell, kangpo_path: Path) -> None:
     """A high-resolution wheel stops between detents; the text follows it (FR-063)."""
     _, window, controller = shell
-    _open_long_section(controller, kangpo_path)
+    open_long_section(controller, kangpo_path)
     page = item(window, "pageArea")
 
     wheel(window, at(page, page.width() / 2, 400), notches=0.5)
@@ -373,7 +355,7 @@ def test_a_wheel_from_a_touchpad_device_scrolls_the_text(shell, kangpo_path: Pat
     drives, not the platform, so this fails on any machine that loses the device.
     """
     _, window, controller = shell
-    _open_long_section(controller, kangpo_path)
+    open_long_section(controller, kangpo_path)
     page = item(window, "pageArea")
 
     wheel(window, at(page, page.width() / 2, 400), device=touch_device())
@@ -386,7 +368,7 @@ def test_a_wheel_from_a_touchpad_device_scrolls_the_text(shell, kangpo_path: Pat
 def test_a_click_on_the_text_does_not_move_it(shell, kangpo_path: Path) -> None:
     """The click zones are gone with the pages; a click on the text is not a turn."""
     _, window, controller = shell
-    _open_long_section(controller, kangpo_path)
+    open_long_section(controller, kangpo_path)
     page = item(window, "pageArea")
 
     click(window, at(page, page.width() * 0.25, 400))
@@ -405,7 +387,7 @@ def test_the_wheel_over_a_panel_leaves_the_text_alone(
     does not secretly move the text underneath (FR-062).
     """
     _, window, controller = shell
-    _open_long_section(controller, kangpo_path)
+    open_long_section(controller, kangpo_path)
     controller.goToSection(heading_section)
     pump(240)
     controller.toggleOutline()
@@ -431,7 +413,7 @@ def test_a_scroll_inside_one_quantum_reuses_the_bitmap(
     image identity only changes when the quantised offset does.
     """
     _, window, controller = shell
-    _open_long_section(controller, kangpo_path)
+    open_long_section(controller, kangpo_path)
     assert controller.scrollOffset == 0.0
     assert not controller.viewImage.isNull()
     first = controller.viewImage.cacheKey()
@@ -456,7 +438,7 @@ def test_the_window_offset_is_the_scroll_offset_on_the_quantum_grid(
 ) -> None:
     """Every key step keeps the two coordinates consistent, whatever it moves by."""
     _, window, controller = shell
-    _open_long_section(controller, kangpo_path)
+    open_long_section(controller, kangpo_path)
 
     for key in ("Down", "PgDown", "Down", "PgUp", "End", "Home"):
         press(window, key)
@@ -472,7 +454,7 @@ def test_the_window_offset_is_the_scroll_offset_on_the_quantum_grid(
 def test_the_line_at_the_end_opens_the_next_chapter(shell, kangpo_path: Path) -> None:
     """The strip is a real button: one click and the reader is in the next part."""
     _, window, controller = shell
-    index = _open_long_section(controller, kangpo_path)
+    index = open_long_section(controller, kangpo_path)
     controller.scrollToBottom()
     pump(200)
 
@@ -498,7 +480,7 @@ def test_the_line_at_the_end_is_named_down_the_middle(shell, kangpo_path: Path) 
     contents column is drawn in (FR-090).
     """
     _, window, controller = shell
-    _open_long_section(controller, kangpo_path)
+    open_long_section(controller, kangpo_path)
     controller.scrollToBottom()
     pump(200)
 
@@ -611,7 +593,7 @@ def test_the_position_bar_stays_put_while_the_text_scrolls(
     nothing there takes the gesture (FR-063).
     """
     _, window, controller = shell
-    _open_long_section(controller, kangpo_path)
+    open_long_section(controller, kangpo_path)
 
     bar = item(window, "positionBar")
     title_label = item(window, "positionTitleLabel")
@@ -693,7 +675,7 @@ def test_the_position_bar_names_the_book_where_its_tree_does_not_reach(
 def test_the_last_chapter_announces_nothing(shell, kangpo_path: Path) -> None:
     """There is no next chapter to name, so the strip stays away (FR-074)."""
     _, window, controller = shell
-    _open_long_section(controller, kangpo_path)
+    open_long_section(controller, kangpo_path)
 
     controller.goToSection(controller.sectionCount - 1)
     controller.scrollToBottom()
@@ -729,7 +711,7 @@ def test_the_next_chapter_is_named_even_when_the_contents_never_names_it(
 def test_the_scroll_bar_moves_the_window(shell, kangpo_path: Path) -> None:
     """A click on the bar is a jump to that fraction of the chapter (FR-076)."""
     _, window, controller = shell
-    _open_long_section(controller, kangpo_path)
+    open_long_section(controller, kangpo_path)
     bar = item(window, "scrollBar")
     handle = item(window, "scrollHandle")
     assert visible(window, "scrollBar")
@@ -759,7 +741,7 @@ def test_the_scroll_bar_moves_the_window(shell, kangpo_path: Path) -> None:
 def test_the_scroll_bar_says_how_long_the_chapter_is(shell, kangpo_path: Path) -> None:
     """The handle is one screenful of text: the bar reports how far the end is."""
     _, window, controller = shell
-    _open_long_section(controller, kangpo_path)
+    open_long_section(controller, kangpo_path)
     bar = item(window, "scrollBar")
     page = item(window, "pageArea")
 

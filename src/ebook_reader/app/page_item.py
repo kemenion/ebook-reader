@@ -5,6 +5,14 @@ the page box (ADR-016); this item blits the visible part of it and nothing else.
 Drawing a *sub-rectangle* is what keeps Python out of the scroll path: the image is
 rasterised once per quantum, and moving within that quantum is a translate here, on
 the GPU, with no callback per frame (ADR-008 / NFR-005).
+
+It also draws the selection (FR-070).  The bands arrive from the controller in *page*
+coordinates - the space the window was rasterised in - so they go through the very
+transform the image just went through, which is what keeps a passage on its own line
+when the item letterboxes or rescales the page, and what saves a second mapping from
+the document to the screen.  The wash is painted *over* the text because the text is a
+bitmap by this point; that is why it carries an alpha and why the palette has a floor
+to hold it to (FR-090).
 """
 
 from __future__ import annotations
@@ -23,6 +31,8 @@ class PageItem(QQuickPaintedItem):
     backgroundChanged = Signal()
     pageSizeChanged = Signal()
     panChanged = Signal()
+    selectionRectsChanged = Signal()
+    selectionColorChanged = Signal()
 
     def __init__(self, parent: object | None = None) -> None:
         super().__init__(parent)
@@ -30,6 +40,8 @@ class PageItem(QQuickPaintedItem):
         self._background = QColor("#ffffff")
         self._page_size = QSizeF()
         self._pan = 0.0
+        self._selection_rects: list[QRectF] = []
+        self._selection_color = QColor(0, 0, 0, 0)
         self.setAntialiasing(True)
         self.setSmooth(True)
 
@@ -94,6 +106,42 @@ class PageItem(QQuickPaintedItem):
 
     pan = Property(float, _get_pan, _set_pan, notify=panChanged)
 
+    def _get_selection_rects(self) -> list[QRectF]:
+        return self._selection_rects
+
+    def _set_selection_rects(self, rects: object) -> None:
+        """The bands of the current selection, in the page's own coordinates (FR-070).
+
+        QML hands these over straight from the controller; an empty list - or ``null``
+        before the controller is injected - simply means nothing is selected.
+        """
+        if rects is None:
+            rects = []
+        clean = [QRectF(rect) for rect in rects]  # type: ignore[union-attr]
+        if clean == self._selection_rects:
+            return
+        self._selection_rects = clean
+        self.selectionRectsChanged.emit()
+        self.update()
+
+    selectionRects = Property(list, _get_selection_rects, _set_selection_rects,
+                              notify=selectionRectsChanged)
+
+    def _get_selection_color(self) -> QColor:
+        return self._selection_color
+
+    def _set_selection_color(self, color: QColor) -> None:
+        if color is None:
+            color = QColor(0, 0, 0, 0)
+        if color == self._selection_color:
+            return
+        self._selection_color = QColor(color)
+        self.selectionColorChanged.emit()
+        self.update()
+
+    selectionColor = Property(QColor, _get_selection_color, _set_selection_color,
+                              notify=selectionColorChanged)
+
     def paint(self, painter: QPainter) -> None:
         bounds = self.contentsBoundingRect()
         painter.fillRect(bounds, self._background)
@@ -115,6 +163,34 @@ class PageItem(QQuickPaintedItem):
             page.height() * ratio,
         )
         painter.drawImage(target, self._image, source)
+        self._paint_selection(painter, target, page)
+
+    def _paint_selection(self, painter: QPainter, target: QRectF, page: QSizeF) -> None:
+        """Wash the selected bands over the text that has just been drawn (FR-070).
+
+        The bands are in page coordinates, and the image has just been mapped from that
+        space into ``target`` by a uniform scale - so the same scale and the same origin
+        put a band where its line is, whether the page is at its natural size or has been
+        letterboxed into a window the layout has not caught up with yet.
+        """
+        if not self._selection_rects or page.isEmpty() or self._selection_color.alpha() == 0:
+            return
+        scale = target.width() / page.width()
+        painter.save()
+        # Nothing of the page is outside the page box, so a band that runs to the edge of
+        # the column is cut off there rather than drawn into the margin beside it.
+        painter.setClipRect(target)
+        for rect in self._selection_rects:
+            painter.fillRect(
+                QRectF(
+                    target.left() + rect.x() * scale,
+                    target.top() + rect.y() * scale,
+                    rect.width() * scale,
+                    rect.height() * scale,
+                ),
+                self._selection_color,
+            )
+        painter.restore()
 
     def _page_box(self, ratio: float) -> QSizeF:
         """One screen's worth of the image, falling back to the image itself."""

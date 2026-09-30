@@ -4,9 +4,10 @@
 matter here only appear once the component tree exists - a derived width that stops
 re-evaluating, a panel that covers the text column, a shortcut whose spelling Qt
 cannot parse, a control that is drawn but takes no clicks, or a warning at
-construction.  Five modules need that harness - the columns (``test_layout.py``), the
+construction.  Six modules need that harness - the columns (``test_layout.py``), the
 scroll view (``test_scroll_view.py``, which drives the keys, the wheel and the scroll
-bar), the outline panel (``test_outline.py``), the right-click menu (``test_menu.py``)
+bar), the pointer on the page (``test_selection.py``, which pans and marks), the outline
+panel (``test_outline.py``), the right-click menu (``test_menu.py``)
 and the contents panel (``test_toc_panel.py``, which needs the controller fixture as
 well) - so it lives here instead of in any of them.
 
@@ -52,6 +53,7 @@ KEYS: dict[str, tuple[Qt.Key, Qt.KeyboardModifier]] = {
     "O": (Qt.Key_O, Qt.NoModifier),
     "S": (Qt.Key_S, Qt.NoModifier),
     "Esc": (Qt.Key_Escape, Qt.NoModifier),
+    "Ctrl+C": (Qt.Key_C, Qt.ControlModifier),
 }
 
 _registered = False
@@ -121,7 +123,13 @@ def double_click(window, position: tuple[int, int]) -> None:
     pump(120)
 
 
-def drag(window, start: tuple[int, int], end: tuple[int, int], steps: int = 5) -> None:
+def drag(
+    window,
+    start: tuple[int, int],
+    end: tuple[int, int],
+    steps: int = 5,
+    modifier: Qt.KeyboardModifier = Qt.NoModifier,
+) -> None:
     """Press at *start*, move to *end* in *steps*, and release there.
 
     A real drag, for the same reason :func:`click` is a real click: the divider has
@@ -129,17 +137,21 @@ def drag(window, start: tuple[int, int], end: tuple[int, int], steps: int = 5) -
     called the QML function behind it would prove neither.  The moves are the plain
     events a pointer sends, not "press, then jump" - a handle that only worked on a
     single jump would pass a one-step version of this.
+
+    *modifier* is held down for the whole gesture, which is how Shift turns a pan
+    into a passage (FR-070): the item reads the modifier off each event, so a test
+    that only pressed the key first would not prove the gesture works.
     """
     from PySide6.QtCore import QPoint, Qt
     from PySide6.QtTest import QTest
 
-    QTest.mousePress(window, Qt.LeftButton, Qt.NoModifier, QPoint(*start))
+    QTest.mousePress(window, Qt.LeftButton, modifier, QPoint(*start))
     for step in range(1, steps + 1):
         x = int(round(start[0] + (end[0] - start[0]) * step / steps))
         y = int(round(start[1] + (end[1] - start[1]) * step / steps))
         QTest.mouseMove(window, QPoint(x, y))
         pump(20)
-    QTest.mouseRelease(window, Qt.LeftButton, Qt.NoModifier, QPoint(*end))
+    QTest.mouseRelease(window, Qt.LeftButton, modifier, QPoint(*end))
     # Long enough for the resize debounce (140 ms) to have re-laid the section out:
     # the drag ends with one report to Python, and the page box is an assertion.
     pump(RESIZE_DEBOUNCE_MS + 40)
@@ -190,6 +202,32 @@ def press(window, name: str) -> None:
     code, modifier = KEYS[name]
     QTest.keyClick(window, code, modifier)
     pump(120)
+
+
+def open_long_section(controller, path: Path, *, screens: float = 2.0) -> int:
+    """Open *path* on a section with room to scroll in, and return its index.
+
+    Deliberately *not* section 0: both books open on a cover that fits on one screen,
+    where every scroll assertion would hold trivially - and where a drag would have
+    nothing to move and a passage nothing to mark.
+
+    Shared, because the two modules that need it are asking the same question about
+    different things: one about what moves the text (``test_scroll_view.py``, the keys,
+    the wheel and the scroll bar) and one about what the pointer does to it
+    (``test_selection.py``, panning and marking).
+    """
+    assert controller.openBook(str(path))
+    pump(240)
+    for index in range(controller.sectionCount):
+        controller.goToSection(index)
+        if controller.scrollMax > screens * controller.viewportHeight:
+            break
+    else:
+        pytest.skip("reference book has no section long enough to scroll in")
+    controller.scrollToTop()
+    pump(120)
+    assert controller.scrollOffset == 0.0
+    return index
 
 
 def touch_device():

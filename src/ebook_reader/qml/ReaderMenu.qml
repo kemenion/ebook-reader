@@ -235,6 +235,23 @@ Menu {
 
     MenuDivider { }
 
+    // ------------------------------------------------------------------ the page
+
+    // The two gestures on the page offer no row of their own - a drag is not something
+    // a menu can describe - so the one operation they carry appears here, and the row
+    // greys out until there is something to copy (FR-070 / FR-071).  It is the reader's
+    // second way to the clipboard, for the reader who has just marked a passage and
+    // would rather not lose it by reaching for the pointer again.
+    MenuAction {
+        objectName: "menuCopy"
+        text: "复制"
+        hint: "Ctrl+C"
+        enabled: ctl ? ctl.hasSelection : false
+        onTriggered: ctl && ctl.copySelection()
+    }
+
+    MenuDivider { }
+
     // ---------------------------------------------------------------- navigation
 
     MenuAction {
