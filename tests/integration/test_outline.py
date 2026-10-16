@@ -18,7 +18,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from ebook_reader.app.controller import ReaderController
+
+from conftest import (
+    RESIZE_DEBOUNCE_MS,
+    centre,
+    item,
+    pump,
+    touch_device,
+    visible,
+    wheel,
+)
 
 #: A comfortable page box, and a narrow one that makes the text be set again.
 PAGE = (900, 1200)
@@ -309,4 +321,50 @@ def test_heading_titles_carry_no_word_joiners(
     assert all(title and title == title.strip() for title in titles)
     assert all("  " not in title for title in titles)
     assert all(int(item["level"]) <= MAX_LEVEL for item in controller.outlineItems)
+
+
+# ---------------------------------------------------- the wheel over the column
+
+
+def test_the_outline_column_answers_the_wheel_with_three_of_its_rows(
+    shell, build_epub, warnings
+) -> None:
+    """The other half of the map, which no reference book can show (FR-093).
+
+    Both columns carry the same handler against the same controller step, but the
+    outline cannot be exercised on the reference books: no section in any of them holds
+    more than seven headings, and thirty-three rows fit in the column, so there would
+    be nothing to scroll and a wheel test would prove nothing.  The book written here
+    says one thing - a section with sixty headings - which is what gives the column the
+    room a reader needs before the wheel means anything.
+    """
+    headings = "".join(f"<h2>第{index}节 小标题</h2><p>正文。</p>" for index in range(60))
+    path = build_epub({"text/ch1.xhtml": f"<html><body>{headings}</body></html>"})
+
+    _, window, controller = shell
+    assert controller.openBook(str(path))
+    pump(RESIZE_DEBOUNCE_MS + 100)
+    controller.toggleOutline()
+    pump(2 * RESIZE_DEBOUNCE_MS)
+    assert visible(window, "outlinePanel")
+
+    listing = item(window, "outlineList")
+    reachable = listing.property("contentHeight") - listing.property("height")
+    assert reachable > 4 * controller.mapWheelStep, "the outline needs room to move"
+    position = centre(listing)
+    start = listing.property("contentY")
+    step = controller.mapWheelStep
+
+    wheel(window, position, 1)
+    assert listing.property("contentY") - start == pytest.approx(step, abs=1.0)
+    wheel(window, position, 1)
+    assert listing.property("contentY") - start == pytest.approx(2 * step, abs=1.0)
+
+    wheel(window, position, notches=0, pixels=60)         # a touchpad (缺陷 30)
+    assert listing.property("contentY") - start == pytest.approx(2 * step + 60.0, abs=1.0)
+
+    wheel(window, position, -1, device=touch_device())    # a seat notch (缺陷 24)
+    assert listing.property("contentY") - start == pytest.approx(step + 60.0, abs=1.0)
+    assert controller.scrollOffset == 0.0                 # the text column stayed put
+    assert warnings == []
 

@@ -46,6 +46,45 @@ Rectangle {
         boundsBehavior: Flickable.StopAtBounds
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
+        // The wheel scrolls the map by three of its own rows (FR-093).  Qt's own
+        // handling gave about one row a notch here: its rule is a quarter of a screen
+        // of *text* lines, and a map row is twice as tall as one, so the 134 row
+        // omnibus took 134 notches to cross.  Taking the event makes the map answer
+        // like the page does - three of its own units - and gives a touchpad somewhere
+        // to land: Qt's flickable reads `angleDelta` alone, so a pixel-only event moved
+        // the map by nothing at all (缺陷 30).
+        //
+        // The distance still comes from the controller.  QML forwards both deltas and
+        // applies whatever comes back, because a delta's sign and unit are what this
+        // codebase keeps in one place (ADR-018 ③).  `acceptedDevices` names the
+        // TouchPad for the same reason the page's handler does: on Wayland every wheel
+        // event arrives attributed to the seat's pointer, which Qt registers as a
+        // TouchPad (缺陷 24).
+        //
+        // Writing `contentY` directly means clamping it here.  A value a little past
+        // the end is taken literally and reconciled only on the next layout, and that
+        // reconciliation is visible: measured, asking for the estimated end moved the
+        // view 131 px back up.  The floor of 0 is what `StopAtBounds` promises the
+        // reader - Qt's own floor can sit a little below the top (`originY` reached
+        // -29 in a measured run, which is the rubber band this panel says it does not
+        // have).
+        WheelHandler {
+            target: null
+            acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+
+            onWheel: function (event) {
+                if (!root.ctl) { return }
+                var distance = root.ctl.mapWheelDistance(event.angleDelta.y, event.pixelDelta.y)
+                if (distance) {
+                    var reachable = Math.max(0, list.contentHeight - list.height)
+                    list.contentY = Math.max(0, Math.min(reachable, list.contentY + distance))
+                }
+                // Taken either way: a phase event carries no distance, and the text
+                // column behind the panel must not read the gesture as its own.
+                event.accepted = true
+            }
+        }
+
         delegate: ItemDelegate {
             id: row
             width: list.width

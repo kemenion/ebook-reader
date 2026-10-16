@@ -50,6 +50,27 @@ Rectangle {
         boundsBehavior: Flickable.StopAtBounds
         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
+        // Same handler as the contents column, against the same controller step
+        // (FR-093): the two maps face the page together, so they answer the wheel
+        // together - three of their own rows a notch, and a touchpad's pixels as the
+        // pixels they are.  See TocSidebar.qml for what Qt's own handling came out at
+        // here, where the two deltas are recognised, and why the position is clamped
+        // where it is written (ADR-018 ③).
+        WheelHandler {
+            target: null
+            acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+
+            onWheel: function (event) {
+                if (!root.ctl) { return }
+                var distance = root.ctl.mapWheelDistance(event.angleDelta.y, event.pixelDelta.y)
+                if (distance) {
+                    var reachable = Math.max(0, list.contentHeight - list.height)
+                    list.contentY = Math.max(0, Math.min(reachable, list.contentY + distance))
+                }
+                event.accepted = true
+            }
+        }
+
         delegate: ItemDelegate {
             width: list.width
             height: Math.max(38, label.implicitHeight + 16)

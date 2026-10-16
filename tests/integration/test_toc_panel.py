@@ -24,10 +24,21 @@ from __future__ import annotations
 import base64
 from pathlib import Path
 
+import pytest
 from PySide6.QtCore import QPointF
 from PySide6.QtQuick import QQuickItem
 
-from conftest import RESIZE_DEBOUNCE_MS, centre, click, item, press, pump, visible
+from conftest import (
+    RESIZE_DEBOUNCE_MS,
+    centre,
+    click,
+    item,
+    press,
+    pump,
+    touch_device,
+    visible,
+    wheel,
+)
 
 
 def toggle_button(window) -> QQuickItem:
@@ -497,3 +508,143 @@ def test_only_closing_it_on_purpose_takes_the_panel_away(
     controller.toggleToc()
     controller.closePanels()
     assert not controller.tocVisible
+
+
+# --------------------------------------------------------------- the wheel on it
+
+
+def test_the_wheel_scrolls_the_map_by_three_of_its_own_rows(
+    shell, linqi_path: Path, warnings
+) -> None:
+    """One notch is three rows of the map, not the one row Qt's own rule gave (FR-093).
+
+    Left to ``ListView``'s built-in handling the map moved 48 px on the first notch and
+    36 px a notch from then on - about one of these 38 px rows - because that rule is a
+    quarter of a screen of *text* lines, and a map row is twice as tall as one.  So
+    crossing the omnibus's 134 rows took 134 turns of the wheel, which is what makes a
+    long map feel unreadable.
+
+    The handler moves by the controller's step and nothing else: over a run of notches
+    there is no drift at all, down or up.
+    """
+    _, window, controller = shell
+    assert controller.openBook(str(linqi_path))
+    pump(RESIZE_DEBOUNCE_MS + 100)
+
+    listing = item(window, "tocList")
+    reachable = listing.property("contentHeight") - listing.property("height")
+    assert reachable > 8 * controller.mapWheelStep, "the map needs room to move in"
+    position = centre(listing)
+    start = listing.property("contentY")
+
+    for notches in (1, 1, 1, -2, 2):          # three down, two up, two down again
+        before = (listing.property("contentY"), controller.scrollOffset)
+        wheel(window, position, notches)
+        assert listing.property("contentY") - before[0] == pytest.approx(
+            notches * controller.mapWheelStep, abs=1.0
+        )
+        # And the text behind the panel did not come along: the map owns the gesture.
+        assert controller.scrollOffset == before[1]
+
+    # Three notches net, with nothing lost on the way (1 + 1 + 1 - 2 + 2).
+    assert listing.property("contentY") - start == pytest.approx(
+        3 * controller.mapWheelStep, abs=1.0
+    )
+    assert warnings == []
+
+
+def test_the_map_step_is_three_of_the_rows_the_map_draws(
+    shell, linqi_path: Path
+) -> None:
+    """The unit is the panel's own row, and the two files that fix it agree (FR-093).
+
+    ``mapWheelStep`` is computed in ``controller.py`` from the 38 px floor while the
+    row height is written in the two QML panels, so this is the assertion that keeps
+    the two together: three rows as the panels draw them, and more than the single row
+    the reader used to get.
+    """
+    _, window, controller = shell
+    assert controller.openBook(str(linqi_path))
+    pump(RESIZE_DEBOUNCE_MS + 100)
+
+    heights = [row.height() for row in _rows(item(window, "tocList"))]
+    assert heights, "the map is showing no rows at all"
+    row_height = min(heights)
+    assert row_height == pytest.approx(38.0, abs=0.01)
+    assert controller.mapWheelStep == pytest.approx(3 * row_height, abs=0.01)
+    assert controller.mapWheelStep > row_height, "a notch is more than one row now"
+
+
+def test_a_smooth_wheel_scrolls_the_map(shell, linqi_path: Path, warnings) -> None:
+    """A touchpad moved the map by nothing at all, and a TouchPad was declined (FR-063).
+
+    Qt's flickable reads ``angleDelta`` alone, so a touchpad, a high-resolution wheel
+    and a free-spinning wheel - which send screen pixels and no angle - were gestures
+    the map did not answer, exactly as the page once did (缺陷 16, here 缺陷 30).  On
+    Wayland the reader's own mouse wheel was declined as well: the seat's pointer is
+    registered as a TouchPad and a handler's default ``acceptedDevices`` is Mouse alone
+    (缺陷 24).
+
+    Both shapes have to keep the map's *own* step, not the page's: a pixel delta is
+    already a distance and is used as it stands, while a notch becomes three rows.
+    """
+    _, window, controller = shell
+    assert controller.openBook(str(linqi_path))
+    pump(RESIZE_DEBOUNCE_MS + 100)
+
+    listing = item(window, "tocList")
+    position = centre(listing)
+    start = listing.property("contentY")
+    step = controller.mapWheelStep
+
+    wheel(window, position, notches=0, pixels=60)              # a touchpad, in pixels
+    assert listing.property("contentY") - start == pytest.approx(60.0, abs=1.0)
+
+    wheel(window, position, 1, device=touch_device())          # a notch, from the seat
+    assert listing.property("contentY") - start == pytest.approx(60.0 + step, abs=1.0)
+
+    wheel(window, position, notches=0, pixels=-60)
+    wheel(window, position, -1, device=touch_device())
+    assert listing.property("contentY") == pytest.approx(start, abs=1.0)
+    assert controller.scrollOffset == 0.0                      # the text stayed put
+    assert warnings == []
+
+
+def test_the_map_stops_at_its_own_ends(shell, linqi_path: Path) -> None:
+    """Rolling past either end of the map leaves it where it is (FR-093).
+
+    A ``contentY`` written from QML is not held to the list's bounds the way a flick
+    is: the overshoot is taken literally and reconciled on the next layout, which the
+    reader sees as the map jumping *back* (measured: 131 px).  Hence the clamp in the
+    handler, and this is what says it is in the right place - no wrap, no jump, and the
+    map comes to rest at the end of its content rather than short of it.
+    """
+    _, window, controller = shell
+    assert controller.openBook(str(linqi_path))
+    pump(RESIZE_DEBOUNCE_MS + 100)
+
+    listing = item(window, "tocList")
+    position = centre(listing)
+    step = controller.mapWheelStep
+
+    # At the top: a wheel up moves nothing, and never a negative distance.
+    top = listing.property("contentY")
+    wheel(window, position, -1)
+    assert listing.property("contentY") >= 0.0
+    assert listing.property("contentY") == pytest.approx(top, abs=1.0)
+
+    # Near the end, then over it: the notches run out at the end of the content, and
+    # the one after them moves nothing at all.
+    reachable = listing.property("contentHeight") - listing.property("height")
+    listing.setProperty("contentY", reachable - 3 * step)
+    pump(150)
+    for _ in range(6):
+        wheel(window, position, 1)
+    end = listing.property("contentY")
+    wheel(window, position, 1)
+    assert listing.property("contentY") == pytest.approx(end, abs=1.0)
+    assert end == pytest.approx(
+        listing.property("contentHeight") - listing.property("height"), abs=1.0
+    )
+
+

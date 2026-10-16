@@ -57,6 +57,21 @@ _WHEEL_LINES = 3
 #: How many pixels the margin control adds or removes per step.
 _MARGIN_STEP = 12
 
+#: One row of a map column, in pixels: the floor both ``TocSidebar.qml`` and
+#: ``OutlinePanel.qml`` give a row (``Math.max(38, title + 16)``), which is what a
+#: title that fits on a single line comes out at.  A map has rows, not lines of body
+#: text, so this - and not ``lineStep`` - is the unit the reader rolls over.
+_MAP_ROW_HEIGHT = 38.0
+
+#: How many rows of a map one wheel notch scrolls (FR-093).  Deliberately the same
+#: number as ``_WHEEL_LINES``: the page and both maps then answer a notch with three
+#: of their own units, and the only difference left between the gestures is whose unit
+#: it is.  Left to Qt's own flickable arithmetic the maps moved about one row a notch
+#: (measured on the omnibus's 134 rows: 48 px on the first notch, 36 px per notch over a
+#: run of twelve, against rows 38 px tall) - that rule counts *text* lines, and a map
+#: row is twice as tall as one - which turned the book into a 134 notch journey.
+_MAP_WHEEL_ROWS = 3
+
 _FONT_SIZE_STEP = 1.0
 _LINE_HEIGHT_STEP = 0.05
 
@@ -334,6 +349,20 @@ class ReaderController(QObject):
         return self.lineStep * _WHEEL_LINES
 
     wheelStep = Property(float, _get_wheel_step, notify=viewChanged)
+
+    def _get_map_wheel_step(self) -> float:
+        """Distance one wheel notch scrolls a map column (FR-093).
+
+        The contents and the outline draw rows, so they get a step in rows: three of
+        them, the same count the page uses for its lines.  Computed here for the two
+        reasons ``wheelStep`` is: QML never multiplies a delta by anything
+        (ADR-018 ③), and a test can assert the number without a window.
+        """
+        return _MAP_ROW_HEIGHT * _MAP_WHEEL_ROWS
+
+    # No notify: unlike the text's step, which follows the font size, this one is a
+    # constant - the panels' rows do not change with the type size.
+    mapWheelStep = Property(float, _get_map_wheel_step)
 
     def _get_at_section_end(self) -> bool:
         """Whether the window is as far down as the section goes (FR-074)."""
@@ -1001,6 +1030,20 @@ class ReaderController(QObject):
             return
         _log.debug("wheel angle=%.1f pixel=%.1f -> %.1f px", angle_y, pixel_y, distance)
         self.scrollBy(distance)
+
+    @Slot(float, float, result=float)
+    def mapWheelDistance(self, angle_y: float, pixel_y: float) -> float:
+        """The distance one wheel event scrolls a *map column* by (FR-063 / FR-093).
+
+        Same two shapes, same conversion, a different unit: three rows of the map
+        instead of three lines of text.  The map columns hold their own ``contentY``
+        (there is no controller state to move - the panels are QML lists, not the
+        engine), so this returns the distance and QML applies it; what it must *not* do
+        is work it out for itself, because that is where the delta conventions get
+        mixed up (ADR-018 ③).  A phase event, with both deltas zero, comes back as
+        0.0 and QML then moves nothing.
+        """
+        return _wheel_distance(angle_y, pixel_y, self.mapWheelStep)
 
     def _set_offset(self, offset: float) -> None:
         """Move the window to *offset*, clamped to the section.
