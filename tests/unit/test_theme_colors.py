@@ -54,17 +54,18 @@ _WASH_OFF_PAPER_FLOOR = 1.5
 #: no glyphs of its own to recolour, and it is paid where it can best be afforded.
 _INK_THROUGH_WASH_FLOOR = 4.5
 
-#: Night's body ink: a light grey, not a white page turned inside out.  The floor is what
-#: keeps the words readable on the deep paper (the 9:1 asserted below); the ceiling is
-#: the reader's own account of it - "浅灰，有点偏白，但不要太白" - because near-white type on
-#: a dark page glares.  Two palettes bracket the window and are named here so the next
-#: person can see what moving it does: #c8c8c8 ink (0.58) was the light-grey-on-a-hole
-#: that started the last revision, and #e6e6ea (0.80) was that revision's overshoot.
-_NIGHT_INK_FLOOR = 0.6
+#: Night's body ink: a light grey, not a white page turned inside out.  The floor keeps
+#: the words readable on the deep paper (the 8:1 asserted below, on top of the AAA 7:1
+#: every surface is held to); the ceiling is the reader's own account of it - "灰一些",
+#: after "浅灰，有点偏白，但不要太白" had already ruled out the near-white end - because
+#: near-white type on a dark page glares.  Two palettes bracket the window and are named
+#: here so the next person can see what moving it does: #d4d4d4 (0.66) is the value this
+#: round was asked to leave behind, and #b0b0b0 (0.43) is too dark to clear AAA at all.
+_NIGHT_INK_FLOOR = 0.55
 
 #: See above.  Headings are exempt: they are rare on the page and are meant to be seen
 #: from across the room.
-_NIGHT_INK_CEILING = 0.75
+_NIGHT_INK_CEILING = 0.62
 
 #: ``SELECTION_ALPHA`` as the value that actually reaches the painter: a ``QColor`` is
 #: eight bits per channel, so 0.35 of a colour arrives as 89/255 and the mixes below are
@@ -210,7 +211,7 @@ def test_night_is_a_deep_grey_with_light_grey_type() -> None:
     # The quiet tier is the one exception, and only in brightness: it is still grey, and
     # its 3:1 floor on every surface is asserted above.
     assert _saturation(colors.muted) <= 0.1
-    assert _contrast(colors.foreground, colors.background) >= 9.0, "night ink is flat on its page"
+    assert _contrast(colors.foreground, colors.background) >= 8.0, "night ink is flat on its page"
     # FR-091: night is the only theme that dims images.
     assert colors.image_dim < 1.0
     assert THEMES[Theme.LIGHT].image_dim == 1.0
