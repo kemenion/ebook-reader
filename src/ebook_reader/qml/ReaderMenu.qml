@@ -11,9 +11,9 @@ import QtQuick.Controls
 // The point of this menu is discoverability: the shortcuts exist, but a reader who
 // has never opened the settings drawer has no way of knowing that `T` means 目录 or
 // that a section outline exists at all.  So the menu is deliberately **flat** -
-// grouped by separators rather than hidden in submenus - with one exception: the six
-// rows whose meaning *is* the current value (字号 / 行距 / 边距 / 字体 / 对齐 / 主题)
-// open a short submenu and carry that value in their own label, so nothing is
+// grouped by separators rather than hidden in submenus - with one exception: the seven
+// rows whose meaning *is* the current value (字号 / 行距 / 边距 / 字体 / 对齐 / 主题 /
+// 滚屏速度) open a short submenu and carry that value in their own label, so nothing is
 // hidden behind a row that does not say what it does.
 //
 // Three more decisions worth recording:
@@ -76,7 +76,7 @@ Menu {
 
     // The parent row of a submenu is not one of the items declared below: nesting a
     // Menu creates that row for us, through this delegate.  Pointing it at MenuAction
-    // is what keeps those six rows aligned with the rest instead of falling back to
+    // is what keeps those seven rows aligned with the rest instead of falling back to
     // the style's own padding.
     delegate: MenuAction { }
 
@@ -284,6 +284,55 @@ Menu {
         hint: "PgDn"
         enabled: root.cHasBook
         onTriggered: ctl && ctl.scrollPageDown()
+    }
+
+    // The one scroll that needs no hand: the text drifts upwards by itself while the
+    // reader eats, holds a sleeping child or reads along with a finger on the page
+    // (FR-094).  This row and `A` are the two ends of the same switch, and the switch
+    // is the only thing that stops the drift: a wheel notch, a key or a jump only
+    // changes where it drifts from.  A toggle in behaviour but not a `checkable` row -
+    // the tick is drawn from `autoScrollRunning` like every other tick here, so no
+    // click can leave the menu and the status bar disagreeing about whether the page
+    // is moving.
+    MenuAction {
+        objectName: "menuAutoScroll"
+        text: "自动滚屏"
+        hint: "A"
+        marked: ctl ? ctl.autoScrollRunning : false
+        enabled: root.cHasBook
+        onTriggered: ctl && ctl.toggleAutoScroll()
+    }
+
+    // ... and how fast it drifts is the row's own value, like 字号 and 主题: a reader
+    // who set the pace last week should not have to remember which of the three it
+    // was.  The pace outlives the session; whether it is drifting does not.
+    ValueMenu {
+        objectName: "menuAutoScrollPace"
+        title: "滚屏速度 " + (ctl ? ctl.autoScrollPaceLabel : "")
+        MenuAction {
+            objectName: "menuAutoScrollSlow"
+            width: parent.width
+            text: "慢"
+            marked: ctl ? ctl.autoScrollPace === "slow" : false
+            enabled: root.cHasBook
+            onTriggered: ctl && ctl.setAutoScrollPace("slow")
+        }
+        MenuAction {
+            objectName: "menuAutoScrollNormal"
+            width: parent.width
+            text: "中"
+            marked: ctl ? ctl.autoScrollPace === "normal" : false
+            enabled: root.cHasBook
+            onTriggered: ctl && ctl.setAutoScrollPace("normal")
+        }
+        MenuAction {
+            objectName: "menuAutoScrollFast"
+            width: parent.width
+            text: "快"
+            marked: ctl ? ctl.autoScrollPace === "fast" : false
+            enabled: root.cHasBook
+            onTriggered: ctl && ctl.setAutoScrollPace("fast")
+        }
     }
 
     MenuAction {

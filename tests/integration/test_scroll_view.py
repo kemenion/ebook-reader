@@ -59,6 +59,7 @@ DOCUMENTED = frozenset(
         "End",
         "]",
         "[",
+        "A",
         "T",
         "O",
         "S",

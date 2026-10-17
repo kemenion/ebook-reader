@@ -3,6 +3,10 @@
 The file is plain JSON under the XDG config directory, so it stays readable,
 hand-editable and easy to debug.  Every read is defensive: a corrupted or
 partially written file must degrade to defaults rather than prevent startup.
+
+Beyond the typography the reader chose, the ``layout`` section holds the two
+preferences that describe *how* they read rather than what the text looks like: the
+width of the side panel (FR-078) and the pace of the auto-scroll (FR-094).
 """
 
 from __future__ import annotations
@@ -142,6 +146,27 @@ class SettingsStore:
         self._layout()["panel_width"] = (
             0 if value <= 0 else max(_PANEL_WIDTH_MIN, min(_PANEL_WIDTH_MAX, value))
         )
+
+    def auto_scroll_pace(self) -> str:
+        """The auto-scroll pace name the reader last chose, or ``""`` (FR-094).
+
+        Only the *name* is kept, and only the controller knows which names exist: an
+        unknown one comes back unchanged and is read there as the default pace, so a
+        hand-edited file - or one written by a later version - cannot produce a speed
+        that this one has no way to draw.
+        """
+        value = self._layout().get("auto_scroll_pace")
+        return value if isinstance(value, str) else ""
+
+    def set_auto_scroll_pace(self, pace: str) -> None:
+        """Remember the auto-scroll pace; ``""`` says "never chosen" (FR-094).
+
+        A reading preference, like the panel width, so it lives in the same section:
+        whether the text is *currently* drifting is deliberately not remembered - a
+        page that starts moving on startup would move under a reader who asked for
+        nothing.
+        """
+        self._layout()["auto_scroll_pace"] = str(pace)
 
     def book_state(self, book_path: str | os.PathLike[str]) -> BookState:
         entry = self._books().get(self._book_key(book_path))

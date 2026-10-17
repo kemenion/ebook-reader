@@ -19,7 +19,7 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 
-from PySide6.QtCore import Property, QObject, QRectF, QSizeF, Signal, Slot
+from PySide6.QtCore import Property, QObject, QRectF, QSizeF, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QGuiApplication, QImage, QTextDocument
 
 from ..domain import BookError, EpubBook
@@ -72,6 +72,46 @@ _MAP_ROW_HEIGHT = 38.0
 #: row is twice as tall as one - which turned the book into a 134 notch journey.
 _MAP_WHEEL_ROWS = 3
 
+#: The paces the auto-scroll offers (FR-094): name -> (label, lines per minute).
+#:
+#: Lines per *minute* rather than pixels per second, because the line is the reader's
+#: unit and not the pixel: one line of Chinese body text is four to seven seconds of
+#: reading, so those four to seven seconds are what a comfortable pace is made of.
+#: Measured in px/s the same setting would scroll twice as fast in words the moment
+#: the reader asked for a bigger type - the distance between two lines grows with
+#: ``lineStep`` and the number of lines read does not.
+_AUTO_SCROLL_PACES: dict[str, tuple[str, float]] = {
+    "slow": ("慢", 6.0),
+    "normal": ("中", 12.0),
+    "fast": ("快", 24.0),
+}
+
+#: The pace a reader who has never chosen one gets: one line every five seconds,
+#: which is a screen (about 28 lines here) in a bit over two minutes.
+_AUTO_SCROLL_DEFAULT_PACE = "normal"
+
+#: How often the auto-scroll timer ticks.  Twenty times a second is fine enough that
+#: the text drifts instead of jumping - and coarse enough that a tick's work (one
+#: offset, a handful of signals) costs nothing measurable (NFR-005).
+_AUTO_SCROLL_TIMER_MS = 50
+
+#: A longer gap than this between two ticks is not reading time.  The machine was
+#: suspended or the process was blocked; carrying the whole interval into one step
+#: would teleport the reader past pages they never saw, so the tick is dropped and
+#: the clock restarts from now.
+_AUTO_SCROLL_MAX_GAP = 1.0
+
+#: Seconds between two writes of the resume point while the window is being moved
+#: *continuously* (FR-094).  A move the reader made in one go - a wheel notch, a key,
+#: a jump from either map - writes at once: it is a place they chose.  A move that
+#: arrives as a stream is another matter: the auto-scroll moves twenty times a
+#: second and a drag moves once per pointer event, and a write per move would be an
+#: atomic file write per frame for a position a few pixels further on.  The place in
+#: the file is at most this far behind the place on screen, and every gesture ends
+#: with a write of its own (stopping the drift, letting go of a drag, changing
+#: chapter, closing the book, quitting).
+_SAVE_THROTTLE_S = 5.0
+
 _FONT_SIZE_STEP = 1.0
 _LINE_HEIGHT_STEP = 0.05
 
@@ -115,6 +155,53 @@ def _wheel_distance(angle_y: float, pixel_y: float, wheel_step: float) -> float:
     if pixel_y:
         return float(pixel_y)
     return 0.0
+
+
+def _auto_scroll_pace(name: str) -> str:
+    """The pace *name* stands for, or the default one (FR-094).
+
+    A name this version does not know - a hand-edited ``config.json``, or one written
+    by a later version - is not an error and must not become a speed nobody chose.
+    """
+    return name if name in _AUTO_SCROLL_PACES else _AUTO_SCROLL_DEFAULT_PACE
+
+
+def _auto_scroll_lines(pace: str) -> float:
+    """How many lines a minute *pace* scrolls (FR-094)."""
+    return _AUTO_SCROLL_PACES[_auto_scroll_pace(pace)][1]
+
+
+def _auto_scroll_pace_label(pace: str) -> str:
+    """The word the reader sees for *pace* (FR-094)."""
+    return _AUTO_SCROLL_PACES[_auto_scroll_pace(pace)][0]
+
+
+def _auto_scroll_step(elapsed: float, lines_per_minute: float, line_step: float) -> float:
+    """How far the text moves in *elapsed* seconds, in pixels (FR-094).
+
+    Worked out from the time that actually passed rather than from the number of
+    ticks, so a busy machine - or a timer Qt fires late, which it is allowed to do -
+    cannot make the text crawl or lurch: the reader asked for a speed, and the speed
+    is what they get.  That is also why the test drives this with a whole minute and
+    nobody has to wait for one.
+    """
+    if elapsed <= 0.0 or lines_per_minute <= 0.0 or line_step <= 0.0:
+        return 0.0
+    return float(elapsed) * float(lines_per_minute) * float(line_step) / 60.0
+
+
+def _auto_scroll_elapsed(previous: float, now: float) -> float:
+    """Seconds since the last tick, or ``0.0`` when that gap is not reading time.
+
+    Two answers of zero, for the same reason: a clock that went backwards (there is
+    nothing to move by) and a gap longer than :data:`_AUTO_SCROLL_MAX_GAP` - the
+    machine slept, or the process was blocked for a second - where moving by the
+    whole interval would skip pages the reader never saw.
+    """
+    elapsed = float(now) - float(previous)
+    if elapsed <= 0.0 or elapsed > _AUTO_SCROLL_MAX_GAP:
+        return 0.0
+    return elapsed
 
 
 def _build_outline(section: LaidOutSection) -> list[dict[str, object]]:
@@ -172,6 +259,9 @@ class ReaderController(QObject):
     tocRowChanged = Signal()
     errorOccurred = Signal(str)
     statusMessage = Signal(str)
+    #: The auto-scroll went on or off, or changed pace (FR-094): the menu's tick, the
+    #: status bar's word for the state and the three pace rows all read this.
+    autoScrollChanged = Signal()
     #: The bands a selection is drawn in are part of the page, so this is announced both
     #: when the passage changes and when the window moves (FR-070).
     selectionChanged = Signal()
@@ -223,6 +313,30 @@ class ReaderController(QObject):
         self._last_render_ms = 0.0
         self._startup_started = time.perf_counter()
         self._startup_ms = 0.0
+        #: Auto-scroll (FR-094): a timer walks the window down the column by itself.
+        #:
+        #: The timer lives here rather than in QML, even though a QML animation would
+        #: cost nothing per frame, because everything that *knows* where the window is
+        #: is here: the scroll bar's handle, the progress counters, the contents
+        #: highlight and the remembered resume point all read ``_scroll_offset``, and
+        #: text moved by an animation would leave all four pointing at a place the
+        #: reader is not.  What the timer does per tick is small - see
+        #: :data:`_AUTO_SCROLL_TIMER_MS` - and the expensive part of scrolling, the
+        #: bitmap, is still only rebuilt when a rendering quantum is crossed (ADR-008).
+        self._auto_timer = QTimer(self)
+        self._auto_timer.setInterval(_AUTO_SCROLL_TIMER_MS)
+        self._auto_timer.timeout.connect(self._on_auto_tick)
+        self._auto_running = False
+        self._auto_pace = _auto_scroll_pace(self._store.auto_scroll_pace())
+        #: Distance the reader has been granted but not yet moved by.  A tick at the
+        #: slow pace is a quarter of a pixel, and `_set_offset` ignores moves below
+        #: `_OFFSET_EPSILON`, so the remainder is carried to the next tick instead of
+        #: being thrown away - which is what keeps the slow pace from standing still.
+        self._auto_pending = 0.0
+        self._auto_last = 0.0
+        #: When the resume point was last written, for the throttle in
+        #: :meth:`_publish_view`.  Zero, so the first move always writes.
+        self._saved_at = 0.0
 
     # -------------------------------------------------------------- properties
 
@@ -460,6 +574,41 @@ class ReaderController(QObject):
         return self._overall_percent() / 100.0
 
     progress = Property(float, _get_progress, notify=viewChanged)
+
+    def _get_auto_scroll_running(self) -> bool:
+        return self._auto_running
+
+    autoScrollRunning = Property(bool, _get_auto_scroll_running, notify=autoScrollChanged)
+
+    def _get_auto_scroll_pace(self) -> str:
+        return self._auto_pace
+
+    autoScrollPace = Property(str, _get_auto_scroll_pace, notify=autoScrollChanged)
+
+    def _get_auto_scroll_pace_label(self) -> str:
+        return _auto_scroll_pace_label(self._auto_pace)
+
+    autoScrollPaceLabel = Property(str, _get_auto_scroll_pace_label, notify=autoScrollChanged)
+
+    def _get_auto_scroll_lines(self) -> float:
+        return _auto_scroll_lines(self._auto_pace)
+
+    autoScrollLinesPerMinute = Property(float, _get_auto_scroll_lines, notify=autoScrollChanged)
+
+    def _get_auto_scroll_status(self) -> str:
+        """What the status bar says while the text drifts by itself (FR-094).
+
+        Empty when it is not drifting, so the label can fall back to the layout
+        diagnostics without having to ask which of the two it is showing.
+        """
+        if not self._auto_running:
+            return ""
+        return (
+            f"自动滚屏 · {self._get_auto_scroll_pace_label()}"
+            f" {self._get_auto_scroll_lines():.0f} 行/分"
+        )
+
+    autoScrollStatus = Property(str, _get_auto_scroll_status, notify=autoScrollChanged)
 
     def _get_status_text(self) -> str:
         if self._error_message:
@@ -862,7 +1011,13 @@ class ReaderController(QObject):
             self.layoutChanged.emit()
             return False
 
+        # The book being closed still needs its place written - and before its archive
+        # is shut, and before the swap, because the place belongs to *that* book.  The
+        # drift itself is *not* stopped (FR-094): it is a mode the reader switched, and
+        # opening another book does not switch it off; the next tick simply finds the
+        # new book and carries on from its remembered place.
         if self._book is not None:
+            self._save_state()
             self._book.close()
         self._book = book
         self._window_cache.clear()
@@ -913,6 +1068,9 @@ class ReaderController(QObject):
 
     @Slot()
     def closeBook(self) -> None:
+        # First: the drift's last step would otherwise run against a book that is
+        # being taken away (FR-094).
+        self.stopAutoScroll()
         self._save_state()
         if self._book is not None:
             self._book.close()
@@ -1045,18 +1203,168 @@ class ReaderController(QObject):
         """
         return _wheel_distance(angle_y, pixel_y, self.mapWheelStep)
 
-    def _set_offset(self, offset: float) -> None:
+    # ------------------------------------------------------------- auto-scroll
+
+    @Slot()
+    def startAutoScroll(self) -> None:
+        """Let the text drift upwards by itself, at the chosen pace (FR-094).
+
+        Two reasons to do nothing: no book is open, or it is already drifting (the
+        menu row is a toggle, and this one is the state it reads).  A chapter that
+        fits on one screen is the third, and it answers out loud - the reader who
+        asked not to have to scroll by hand should not be left watching a still page
+        and wondering whether the click registered.
+        """
+        if self._engine is None or self._book is None or self._auto_running:
+            return
+        if self.scrollMax <= _OFFSET_EPSILON:
+            self.statusMessage.emit("本卷只有一屏，无需滚屏")
+            return
+        self._auto_running = True
+        self._auto_pending = 0.0
+        # The clock starts here rather than at the last tick, so the first step is
+        # one interval long and not however long the reader sat in the menu.
+        self._auto_last = time.perf_counter()
+        self._auto_timer.start()
+        self.autoScrollChanged.emit()
+        _log.debug("auto-scroll started, pace=%s", self._auto_pace)
+
+    @Slot()
+    def stopAutoScroll(self) -> None:
+        """Switch the drift off (FR-094).
+
+        The reader's switch is the only thing that ends it: the menu row and `A` both
+        arrive here through :meth:`toggleAutoScroll`, and nothing the reader's hand
+        does to the page does - the wheel, the keys, the scroll bar, a pan, a jump, a
+        chapter change all just move the place the text drifts *from*.  Three ends of
+        the world call it themselves because there is nothing left to drift through:
+        closing the book, quitting, and running out of book at the last line
+        (:meth:`autoScrollStep`).
+        """
+        if not self._auto_running:
+            return
+        self._auto_running = False
+        self._auto_timer.stop()
+        self._auto_pending = 0.0
+        # The reader stopped somewhere, and that is the place to come back to; the
+        # periodic saves while it was drifting can be up to `_SAVE_THROTTLE_S` behind
+        # - and the reader has just chosen this place, so it is worth a write now.
+        self._save_state()
+        self.autoScrollChanged.emit()
+        _log.debug("auto-scroll stopped at %.1f px", self._scroll_offset)
+
+    @Slot()
+    def toggleAutoScroll(self) -> None:
+        """On if it is off, off if it is on (the menu row and `A`)."""
+        if self._auto_running:
+            self.stopAutoScroll()
+        else:
+            self.startAutoScroll()
+
+    @Slot(str)
+    def setAutoScrollPace(self, pace: str) -> None:
+        """Choose one of the three paces, and remember it (FR-094).
+
+        Remembered rather than kept for the session: it is a reading preference like
+        the panel width, and a reader who wants the slow pace wants it tomorrow too.
+        Whether it is *drifting* is not remembered - a book that starts scrolling by
+        itself on startup would be a page moving under a reader who never asked.
+        """
+        if pace not in _AUTO_SCROLL_PACES or pace == self._auto_pace:
+            return
+        self._auto_pace = pace
+        self._store.set_auto_scroll_pace(pace)
+        self._store.save()
+        # Whatever was carried belonged to the old pace's step and is dropped, so a
+        # change of pace takes effect on the next tick and not a fraction late.
+        self._auto_pending = 0.0
+        self.autoScrollChanged.emit()
+        _log.debug("auto-scroll pace=%s", pace)
+
+    @Slot(float)
+    def autoScrollStep(self, elapsed: float) -> None:
+        """Move the window by one tick's worth, and mind both ends of the book (FR-094).
+
+        A slot of its own, and not hidden inside the timer's callback, because this
+        *is* the feature: the timer only ever supplies the time.  A test drives it
+        with whole seconds instead of waiting for them, and the one claim nobody can
+        check by hand - that a minute of scrolling is a minute's worth of lines - is
+        then an assertion rather than a stopwatch.
+        """
+        if not self._auto_running or self._engine is None or self._book is None:
+            return
+        # A hand on the page holds the drift still without switching it off (FR-094):
+        # a drag recomputes its offset from where it started, so a tick in between
+        # would be undone by the next pointer event, and a passage would slide out from
+        # under the pointer selecting it.  `_on_auto_tick` has already moved the clock,
+        # so the hold costs no catch-up step when the hand comes off.
+        if self._drag_origin is not None or self._sel_anchor is not None:
+            return
+        # A section that fits on one screen has nowhere to drift *to*, and its end is
+        # not the end of anything: taking it for the column end would walk the reader
+        # off a cover page and into the first chapter, unasked (FR-094).  The reader is
+        # told why when they switch the drift on there (:meth:`startAutoScroll`).
+        if self.scrollMax <= _OFFSET_EPSILON:
+            return
+        step = _auto_scroll_step(elapsed, _auto_scroll_lines(self._auto_pace), self.lineStep)
+        if step <= 0.0:
+            return
+        self._auto_pending += step
+        # Below the threshold a move would not even repaint (`_set_offset` says so),
+        # so the distance waits for the next tick rather than being lost.  At the
+        # slow pace that is roughly every fourth tick - four times a second - and it
+        # is invisible, which is the point of a drift.
+        if self._auto_pending < _OFFSET_EPSILON:
+            return
+        move, self._auto_pending = self._auto_pending, 0.0
+        if self._scroll_offset + move >= self.scrollMax - _OFFSET_EPSILON:
+            if self._adjacent_section(1) < 0:
+                # The end of the book.  Stop and say so, rather than scrolling
+                # against a wall for the rest of the evening.  This is the one end
+                # that is not a gesture and not the reader's switch, but the content
+                # running out - there is nothing left to drift through.
+                self._set_offset(self.scrollMax, remember=False)
+                self.stopAutoScroll()
+                self.statusMessage.emit("已到全书末尾，自动滚屏已停止")
+                return
+            # Riding into the next chapter is the whole point: the reader asked not
+            # to have to turn pages (FR-094).  The last screenful of the chapter has
+            # been in front of them for a while, so nothing goes unread - and the
+            # same call keeps the book remembering where they are.  The drift is not
+            # touched, so it carries on at the top of the new chapter.
+            self._step_section(1)
+            return
+        self._set_offset(self._scroll_offset + move, remember=False)
+
+    def _on_auto_tick(self) -> None:
+        """One timer tick: how long since the last one, and move by that (FR-094)."""
+        now = time.perf_counter()
+        elapsed = _auto_scroll_elapsed(self._auto_last, now)
+        self._auto_last = now
+        if elapsed <= 0.0:
+            return
+        self.autoScrollStep(elapsed)
+
+    def _set_offset(self, offset: float, *, remember: bool = True) -> None:
         """Move the window to *offset*, clamped to the section.
 
         Deliberately does *not* walk into the next section at the end (FR-074): the
         reader stays at the end of this chapter until they ask to leave, which is
-        what a long web page does too.
+        what a long web page does too.  The auto-scroll is the one caller that says
+        otherwise, by stepping the section itself (FR-094).
+
+        Moving the window by hand does *not* end the auto-scroll (FR-094): the drift
+        is a mode the reader switches, not a mode any gesture may switch off, so a
+        wheel notch under a drifting page simply moves the place it drifts *from*.
+        ``remember=False`` is the drift's and the drag's, for the save throttle (see
+        :data:`_SAVE_THROTTLE_S`): both arrive as a stream of moves, and neither may
+        leave the position on disk behind the position on screen.
         """
         offset = max(0.0, min(float(offset), self.scrollMax))
         if abs(offset - self._scroll_offset) < _OFFSET_EPSILON:
             return
         self._scroll_offset = offset
-        self._publish_view()
+        self._publish_view(remember=remember)
 
     @Slot()
     def nextSection(self) -> None:
@@ -1124,12 +1432,18 @@ class ReaderController(QObject):
 
         The text follows the pointer, so dragging *down* moves the window back *up* the
         section: hence the minus sign.
+
+        ``remember=False`` because a drag is a *stream* of moves - one per pointer
+        event, sixty a second at best - and each of them used to write the whole
+        configuration file for a position a few pixels further on (FR-094 / ADR-024).
+        The throttle in ``_publish_view`` writes one every few seconds during a slow
+        drag, and :meth:`endDrag` writes the place the reader let go at.
         """
         if self._drag_origin is None:
             return
         self._drag_moved = True
         origin_y, origin_offset = self._drag_origin
-        self._set_offset(origin_offset - (float(y) - origin_y))
+        self._set_offset(origin_offset - (float(y) - origin_y), remember=False)
 
     @Slot()
     def endDrag(self) -> None:
@@ -1151,6 +1465,10 @@ class ReaderController(QObject):
         self._word_taken = False
         if not moved and not word_taken:
             self.clearSelection()
+        elif moved:
+            # The moves themselves did not write it (`dragTo`), so this is where the
+            # place the reader let go at becomes the place to come back to (FR-094).
+            self._save_state()
 
     @Slot(float, float)
     def beginSelection(self, x: float, y: float) -> None:
@@ -1611,7 +1929,7 @@ class ReaderController(QObject):
         done = self._section_index * average + self._scroll_offset
         return max(0.0, min(100.0, done / (average * sections) * 100.0))
 
-    def _publish_view(self, *, set_section: bool = False) -> None:
+    def _publish_view(self, *, set_section: bool = False, remember: bool = True) -> None:
         if self._engine is not None:
             stats = self._engine.last_stats
             self._last_section_ms = stats.build_ms if stats else 0.0
@@ -1639,7 +1957,14 @@ class ReaderController(QObject):
         if set_section or row != self._toc_row:
             self._toc_row = row
             self.tocRowChanged.emit()
-        self._save_state()
+        # Remembering the place on every move is what makes a wheel notch, a jump or
+        # a resize come back after a restart, and it is a file write each time - which
+        # a reader's own move is worth.  A *stream* of moves is not (FR-094): the
+        # auto-scroll's twenty a second and the drag's one per pointer event both pass
+        # ``remember=False``, and are written every `_SAVE_THROTTLE_S` seconds instead
+        # plus one final write when the gesture ends.
+        if remember or time.perf_counter() - self._saved_at >= _SAVE_THROTTLE_S:
+            self._save_state()
 
     def _save_state(self) -> None:
         """Remember the resume point: opening block plus a fraction of its height."""
@@ -1658,6 +1983,7 @@ class ReaderController(QObject):
             ),
         )
         self._store.save()
+        self._saved_at = time.perf_counter()
 
     def _fraction_within_block(self, section: LaidOutSection) -> int:
         """How far into its opening block the window starts, in per mille.
@@ -1697,6 +2023,9 @@ class ReaderController(QObject):
     @Slot()
     def shutdown(self) -> None:
         """Persist everything before the process exits."""
+        # First the drift, then the place: `stopAutoScroll` writes the position the
+        # reader was stopped at, which is the one that matters (FR-094).
+        self.stopAutoScroll()
         self._save_state()
         self._store.save()
 

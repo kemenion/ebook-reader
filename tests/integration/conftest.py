@@ -49,6 +49,7 @@ KEYS: dict[str, tuple[Qt.Key, Qt.KeyboardModifier]] = {
     "End": (Qt.Key_End, Qt.NoModifier),
     "]": (Qt.Key_BracketRight, Qt.NoModifier),
     "[": (Qt.Key_BracketLeft, Qt.NoModifier),
+    "A": (Qt.Key_A, Qt.NoModifier),
     "T": (Qt.Key_T, Qt.NoModifier),
     "O": (Qt.Key_O, Qt.NoModifier),
     "S": (Qt.Key_S, Qt.NoModifier),

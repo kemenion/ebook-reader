@@ -6,9 +6,11 @@ missing key, a key of the wrong type, a number outside the range the window can 
 None of them may raise, and none of them may produce a layout that cannot be drawn -
 which is why the bounds are asserted at the store, not only at the drag.
 
-Only the width is covered; the settings, window and per-book sections have their rules
-exercised through the controller and the shell (`tests/integration/`), and what this
-file adds is the arithmetic the *next* session starts from.
+Only the layout preferences are covered here; the settings, window and per-book
+sections have their rules exercised through the controller and the shell
+(`tests/integration/`), and what this file adds is the arithmetic the *next* session
+starts from - the panel width (FR-078) and, since the auto-scroll arrived, the pace
+it runs at (FR-094).
 """
 
 from __future__ import annotations
@@ -99,13 +101,52 @@ def test_the_new_section_does_not_disturb_the_others(tmp_path: Path) -> None:
     store.set_window(1200, 900)
     store.set_book_state("/tmp/book.epub", BookState(section=3, block=7, char_offset=250))
     store.set_panel_width(320)
+    store.set_auto_scroll_pace("fast")
     assert store.save()
 
     reopened = SettingsStore(path)
     assert reopened.window() == {"width": 1200, "height": 900}
     assert reopened.book_state("/tmp/book.epub").as_tuple() == (3, 7, 250)
     assert reopened.panel_width() == 320
+    assert reopened.auto_scroll_pace() == "fast"
     # Saving the window again - which happens on every close - keeps the width.
     reopened.set_window(1100, 800)
     assert reopened.save()
     assert SettingsStore(path).panel_width() == 320
+    assert SettingsStore(path).auto_scroll_pace() == "fast"
+
+
+def test_the_auto_scroll_pace_survives_a_restart(tmp_path: Path) -> None:
+    """The pace is a reading preference, so tomorrow's session starts with it (FR-094)."""
+    path = tmp_path / "config.json"
+    assert SettingsStore(path).auto_scroll_pace() == ""      # never chosen
+
+    store = SettingsStore(path)
+    store.set_auto_scroll_pace("slow")
+    assert store.save()
+    assert SettingsStore(path).auto_scroll_pace() == "slow"
+    # Readable and hand-editable, like everything else in the file (FR-083).
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["layout"]["auto_scroll_pace"] == "slow"
+
+
+def test_a_pace_that_is_not_even_a_name_is_not_an_error(tmp_path: Path) -> None:
+    """A hand-edited file must not be able to hand the controller something unreadable.
+
+    The *name* is stored as written - which pace names exist is the controller's
+    question, not this file's - but anything that is not text at all comes back as
+    "never chosen" rather than as a number the reader would then be scrolled at.
+    """
+    path = tmp_path / "config.json"
+    for raw in (
+        {"layout": {"auto_scroll_pace": 12}},
+        {"layout": {"auto_scroll_pace": None}},
+        {"layout": {"auto_scroll_pace": ["fast"]}},
+        {"layout": {"auto_scroll_pace": {}}},
+    ):
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        assert SettingsStore(path).auto_scroll_pace() == "", raw
+
+    # An *unknown* name is passed through unchanged for the controller to normalise.
+    path.write_text(json.dumps({"layout": {"auto_scroll_pace": "turbo"}}), encoding="utf-8")
+    assert SettingsStore(path).auto_scroll_pace() == "turbo"

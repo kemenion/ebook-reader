@@ -30,6 +30,10 @@ Rectangle {
     readonly property string cDiagnostics: ctl ? ctl.statusText : ""
     readonly property string cError: ctl ? ctl.errorMessage : ""
     readonly property real cProgress: ctl ? ctl.progress : 0
+    // The state of the auto-scroll, while it is drifting and only then (FR-094):
+    // empty the rest of the time, so the label below falls back to the diagnostics
+    // it shows when nothing is happening.
+    readonly property string cAutoScroll: ctl ? ctl.autoScrollStatus : ""
 
     // A passing word from the controller - 已复制 12 字 once a marked passage reaches
     // the clipboard (FR-070) - which takes the diagnostics' place for a few seconds.
@@ -173,8 +177,12 @@ Rectangle {
         anchors.rightMargin: 16
         anchors.verticalCenter: parent.verticalCenter
         width: Math.min(parent.width * 0.4, implicitWidth)
+        // A passing word first, then the auto-scroll's state, then the diagnostics:
+        // the reader who just copied something or just started the drift gets an
+        // answer to what they did before anything else (FR-070 / FR-094).
         text: cError.length > 0 ? cError
               : cMessage.length > 0 ? cMessage
+              : cAutoScroll.length > 0 ? cAutoScroll
               : cDiagnostics
         color: cError.length > 0 ? "#c0392b" : cMuted
         font.pixelSize: 12

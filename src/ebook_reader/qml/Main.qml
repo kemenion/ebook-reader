@@ -472,6 +472,12 @@ ApplicationWindow {
     Shortcut { sequence: "End"; onActivated: ctl && ctl.scrollToBottom() }
     Shortcut { sequence: "]"; onActivated: ctl && ctl.nextSection() }
     Shortcut { sequence: "["; onActivated: ctl && ctl.previousSection() }
+    // The one scroll that needs no hand: the text drifts upwards by itself at the
+    // pace the menu remembers, and keeps going into the next chapter at the end of
+    // this one.  This key and the menu row are the *only* things that stop it - every
+    // other way of moving the page (a wheel notch, a key, a jump) merely changes the
+    // place the text drifts from (FR-094).
+    Shortcut { sequence: "A"; onActivated: ctl && ctl.toggleAutoScroll() }
     Shortcut { sequence: "T"; onActivated: ctl && ctl.toggleToc() }
     Shortcut { sequence: "O"; onActivated: ctl && ctl.toggleOutline() }
     Shortcut { sequence: "S"; onActivated: ctl && ctl.toggleSettings() }

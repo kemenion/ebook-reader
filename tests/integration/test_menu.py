@@ -44,6 +44,8 @@ ROWS = (
     "向下滚动",
     "上滚一屏",
     "下滚一屏",
+    "自动滚屏",
+    "滚屏速度",
     "本卷开头",
     "本卷结尾",
     "上一章",
@@ -75,6 +77,9 @@ CHOICES = (
     "日间",
     "米色",
     "夜间",
+    "慢",
+    "中",
+    "快",
 )
 
 
@@ -388,6 +393,7 @@ def test_a_row_carries_the_shortcut_it_stands_for(shell, kangpo_path: Path) -> N
     assert row(window, "上一章").property("hint") == "["
     assert row(window, "向下滚动").property("hint") == "↓"
     assert row(window, "下滚一屏").property("hint") == "PgDn"
+    assert row(window, "自动滚屏").property("hint") == "A"
     assert menu_item(window, "menuSettings").property("hint") == "S"
     assert menu_item(window, "menuSectionTop").property("hint") == "Home"
     assert menu_item(window, "menuQuit").property("hint") == "Ctrl+Q"
