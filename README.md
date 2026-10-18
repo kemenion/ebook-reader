@@ -69,6 +69,57 @@ python3 -m venv .venv
 PYTHONPATH=src .venv/bin/python -m ebook_reader 你的书.epub
 ```
 
+## 打包与分发
+
+源码运行只需要 PySide6；打可分发的包还需要 PyInstaller。`appimagetool` 与 AppImage runtime
+由 `build-appimage.sh` 自动下载到 `build/tools/`（先直连 GitHub，失败时改用 `ghfast.top` /
+`ghproxy.net` 镜像；也可以用 `APPIMAGETOOL` / `APPIMAGE_RUNTIME` 指向手动下载的文件）。
+
+```bash
+.venv/bin/pip install pyinstaller==6.22.3
+
+# 1) 文件夹版：启动最快，也是 AppImage 的底料
+packaging/build.sh --dir-only
+
+# 2) 从文件夹版生成单个 AppImage
+packaging/build-appimage.sh
+```
+
+也可以一步完成（`--build` 会先调用 `build.sh --dir-only`，而后者会清空 `dist/` 与 `build/`）：
+
+```bash
+packaging/build-appimage.sh --build
+```
+
+产物：
+
+| 产物 | 体积 | 说明 |
+|---|---:|---|
+| `dist/ebook-reader-dir/` | 162 MB | 文件夹版，启动最快 |
+| `dist/ebook-reader` | 58 MB | PyInstaller 单文件版，每次启动要解包 |
+| `dist/ebook-reader-x86_64.AppImage` | **54 MB** | 单文件可执行，基于文件夹版，满足 NFR-011（≤150 MB） |
+
+运行 AppImage：
+
+```bash
+chmod +x dist/ebook-reader-x86_64.AppImage
+./dist/ebook-reader-x86_64.AppImage 你的书.epub
+```
+
+也可以直接双击；在 KDE 上需要文件管理器允许运行可执行文件，否则右键选「运行」。AppImage 内嵌的
+`.desktop` 用 `Exec=ebook-reader %f`，**不写 `TryExec`**（宿主 PATH 找不到命令时，KDE 会因此隐藏菜单项）。
+需要应用菜单集成时可交给 AppImageLauncher 等外部工具。
+
+AppImage 需要宿主机的 FUSE 2（Debian 13：`sudo apt install libfuse2t64`；旧版 Debian / Ubuntu：
+`libfuse2`）。没有 FUSE 时用官方回退：
+
+```bash
+APPIMAGE_EXTRACT_AND_RUN=1 ./dist/ebook-reader-x86_64.AppImage 你的书.epub
+```
+
+实测（本机，offscreen，合集 135 节 / 134 行目录）：FUSE 直接启动到首屏 **0.52 s**（首屏就绪 203 ms）；
+`APPIMAGE_EXTRACT_AND_RUN=1` **0.57 s**（首屏就绪 132 ms）。两者都满足 NFR-001。
+
 ## 快捷键
 
 | 键 | 作用 |
@@ -147,6 +198,7 @@ src/ebook_reader/
 ├── typeset/                   依赖 QtGui：文档构建 + 连续列布局 + 窗口渲染 + 图片缓存 + 选区取位/取词/条带
 ├── app/                       QML 控制器、设置持久化、启动引导
 └── qml/                       界面（无业务逻辑）
+packaging/                     PyInstaller spec/build、bundle 检查、AppImage 组装
 tests/unit/ tests/integration/
 ```
 

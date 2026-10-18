@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"
+     viewBox="0 0 256 256" role="img" aria-label="Ebook Reader">
+  <!-- Sepia paper and the reader's ink colours, so the icon belongs to the
+       same palette as the app's default theme. -->
+  <rect width="256" height="256" rx="56" fill="#f5ecd9"/>
+  <rect x="44" y="40" width="168" height="176" rx="20" fill="#3b3226"/>
+  <rect x="62" y="58" width="132" height="140" rx="8" fill="#fffaf0"/>
+  <!-- Gutter between the two pages. -->
+  <path d="M128 58v140" stroke="#c9b48a" stroke-width="4"/>
+  <!-- Lines of text, kept short and geometric so the icon reads at 32 px. -->
+  <g stroke="#8a5a1f" stroke-width="6" stroke-linecap="round" opacity="0.86">
+    <path d="M80 84h30M80 104h30M80 124h30M80 144h30"/>
+    <path d="M146 84h30M146 104h30M146 124h30M146 144h30"/>
+  </g>
+  <!-- Bookmark ribbon in the selection accent. -->
+  <path d="M180 40h24v64l-12-10-12 10z" fill="#3b6fd0"/>
+</svg>

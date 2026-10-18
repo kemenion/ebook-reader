@@ -471,12 +471,13 @@ ReaderController 求新偏移并判断是否越过本节两端
 | 项 | 内容 |
 |---|---|
 | **背景** | NFR-011 要求分发包 ≤ 150MB；风险 R-07：打包器易漏 QML / 插件资源。 |
-| **决策** | ① 用 **PyInstaller**（`packaging/ebook-reader.spec` + `packaging/build.sh`）产出两种产物：`dist/ebook-reader-dir/`（文件夹版，启动快，AppImage 的底料）与 `dist/ebook-reader`（单文件版，62.1 MB，即分发包）；② Qt 侧资源全部交给 PySide6 hook 自动收集，收集过头之后再用 `packaging/bundle.py` 做**可控剪裁**；③ `.desktop` 随构建生成（内嵌真实路径），`xdg-mime` 关联作为可选的免 root 安装步骤；④ 产物正确性由 `bundle.py check` 与 `build.sh` 的冒烟测试保证。 |
+| **决策** | ① 用 **PyInstaller**（`packaging/ebook-reader.spec` + `packaging/build.sh`）产出 `dist/ebook-reader-dir/`（文件夹版，启动快，AppImage 的底料）与 `dist/ebook-reader`（单文件版，58 MB，便于拷贝）；② `packaging/build-appimage.sh` 以**文件夹版为 payload** 组装 AppDir（`packaging/appimage/AppRun` + 无 `TryExec` 的 `.desktop` + SVG/256 px PNG 图标），用 `appimagetool` 生成 `dist/ebook-reader-x86_64.AppImage`（**54 MB**，SquashFS/zstd），满足 NFR-011；③ Qt 侧资源全部交给 PySide6 hook 自动收集，收集过头之后再用 `packaging/bundle.py` 做**可控剪裁**；④ `.desktop` 随构建生成（文件夹版内嵌真实路径；AppImage 内用 `Exec=ebook-reader %f`），`xdg-mime` 关联作为可选的免 root 安装步骤；⑤ 产物正确性由 `bundle.py check` 与 `build.sh` / `build-appimage.sh` 的冒烟测试保证。 |
+| **AppImage 细节** | 基于文件夹版而不是单文件版：AppImage 本身是 SquashFS 按需挂载，若再套一层 PyInstaller 单文件解包，每次启动都要多付约 160 MB 的解包成本。`AppRun` 用 `exec` 启动 `usr/bin/ebook-reader`；`.desktop` 不写 `TryExec`；宿主需 `libfuse2`，无 FUSE 时回退 `APPIMAGE_EXTRACT_AND_RUN=1`。 |
 | **理由** | PyInstaller 的 PySide6 hook 会递归收集整个 `PySide6/Qt/qml` 树（凡含 `qmldir` 的目录都收），因此**无需手工枚举 Qt 的 QML 模块**——这正是 R-07 最容易出事的地方。 |
 | **`.qrc` 决策变更** | 原计划的 `.qrc` 编译**不再采用**。hook 已把 Qt 自身的 QML 模块按散文件收集，`qmldir` 驱动的隐式组件解析（`Main.qml` 直接按文件名引用同级组件）在打包后原样可用；若改走 `.qrc`，Qt 的 QML 模块仍必须是散文件，等于两套机制并存而无收益，却要额外引入 `pyside6-rcc` 步骤并重新验证每一条资源路径。 |
-| **已否决** | ① `pip install` 直接分发：用户需自装 Python，体验差。② Flatpak：包体更大且需系统 runtime。③ Nuitka / `pyside6-deploy`：需把整个应用编译为 C，构建时间显著更长，而收益（启动速度）对本项目已被证明不关键。④ 手工 `--add-data` 枚举 Qt QML 模块：漏一项即静默失效，正是 R-07 本身。 |
-| **后果（代价）** | 单文件版每次启动需解包约 160 MB，首屏由 0.27 s 变为 1.00 s——仍满足 NFR-001，但吃掉了大部分余量。**日常使用与 AppImage 应基于文件夹版**；单文件版只用于分发与拷贝。 |
-| **验证** | 见 §12.8：两种产物在真实 Wayland 下三种启动方式均 0 错误；`bundle.py check` 报 0 个未解析库、0 个未解析 QML import。 |
+| **已否决** | ① `pip install` 直接分发：用户需自装 Python，体验差。② Flatpak：包体更大且需系统 runtime。③ Nuitka / `pyside6-deploy`：需把整个应用编译为 C，构建时间显著更长，而收益（启动速度）对本项目已被证明不关键。④ 手工 `--add-data` 枚举 Qt QML 模块：漏一项即静默失效，正是 R-07 本身。⑤ 用 PyInstaller **单文件版**做 AppImage 的 payload：每次启动先解包约 160 MB，与 AppImage 按需挂载的收益相抵。⑥ AppImage 的 `.desktop` 写 `TryExec=ebook-reader`：命令不在宿主 PATH 上，KDE 会因此隐藏菜单项。 |
+| **后果（代价）** | 单文件版每次启动需解包约 160 MB，首屏由 0.27 s 变为 1.00 s——仍满足 NFR-001，但吃掉了大部分余量。AppImage 基于文件夹版，FUSE 直接启动到首屏 0.52 s，无 FUSE 时 `APPIMAGE_EXTRACT_AND_RUN=1` 为 0.57 s；代价是宿主机需要 `libfuse2`，且应用菜单集成仍要 AppImageLauncher 之类的外部工具。**日常使用与 AppImage 都应基于文件夹版**；单文件版只用于拷贝。 |
+| **验证** | 见 §12.8：文件夹版 / 单文件版 / AppImage 三种产物均通过冒烟测试；AppImage 的 FUSE 直接运行、无参数启动与 `APPIMAGE_EXTRACT_AND_RUN=1` 回退均 0 错误；`bundle.py check` 报 0 个未解析库、0 个未解析 QML import。 |
 
 ---
 
@@ -990,7 +991,7 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q
 | **P4 界面完善** | 目录侧栏、**本节大纲栏（三栏布局）**、**右键「全部操作」菜单**、设置面板（字号/字体/行高/边距/主题）、沉浸模式、窗口状态记忆、脚注跳转 | 达到「好用」 | FR-014~019, FR-034~037, FR-065~066, FR-071, FR-081~082, FR-090, FR-092, FR-093, FR-094 | 🟡 目录、大纲（ADR-014）、右键菜单（ADR-015）、设置面板、**两栏地图的滚轮**（FR-093 / 缺陷 30，ADR-018 ⑤）与**自动滚屏**（FR-094 / ADR-024）已完成；沉浸模式与脚注跳转待做 |
 | **P5 中文排版美化** | 标点挤压、字体栈精调、标点全角/半角、图片与图注样式（「孤行控制」已随页边界一起消失，ADR-016） | 观感超过 Foliate 默认 | FR-040~041, FR-053 | ⬜ |
 | **P6 过渡动画** | 三档：① 位移淡入（已实现）② 3D 翻转+阴影 ③ 纸张卷曲（shader，`ShaderEffectSource` + `ShaderEffect`）。**连续列下滚动本身不需要动画**，这三档只对「换节 / 跳转」这类整屏切换成立 | 60fps 稳定（NFR-005） | FR-092, G6 | 🟡 档①已完成 |
-| **P7 打包与分发** | PyInstaller spec + `build.sh`、可控剪裁（`bundle.py`）、`dist/` 双产物、`.desktop`、`xdg-mime` 关联 | 双击 `.epub` 用本应用打开 | NFR-011, R-07 | 🟡 见 §12.8：二进制与 `.desktop` 已完成，单文件版 62.1 MB 达标；AppImage 与 Windows 脚本待做 |
+| **P7 打包与分发** | PyInstaller spec + `build.sh`、可控剪裁（`bundle.py`）、`dist/` 双产物、`build-appimage.sh` + `packaging/appimage/`、`.desktop`、`xdg-mime` 关联 | 双击 `.epub` 用本应用打开 | NFR-011, R-07 | 🟡 见 §12.8：双产物与 AppImage（54 MB）已完成，三种启动方式 0 错误；Windows 脚本待做 |
 | **P8 可选增强** | 全书搜索、进度条拖动、最近书籍（~~文本选择复制~~ 与其配套的鼠标拖拽平移**已完成**，见 ADR-023） | P2 需求 | FR-068, FR-069, FR-084 | ⬜ 其余待做；FR-070 / FR-079 已落地（`test_selection.py` 28 项） |
 
 **关键门禁（Gate）**：
@@ -1159,11 +1160,12 @@ PageView.qml:23: Unable to assign null to QImage
 | `PySide6-Essentials` wheel | **80.1 MB**（对照：完整 `PySide6` 需额外 167 MB 的 Addons，含完全用不到的 QtWebEngine） |
 | 安装后 `PySide6/` 解压体积 | 233 MB（其中 `Qt/lib` 129 MB、`Qt/qml` 23 MB、`translations` 14 MB） |
 | 可裁剪项 | `libQt6Designer` 9.4 MB、`translations` 中非 zh/en 约 12 MB、`sqldrivers` 2.3 MB、未使用的 qml 控件样式 — 合计约 25–40 MB |
-| AppImage 预估（squashfs 压缩后） | **约 70–90 MB**，满足 NFR-011（≤150 MB） |
+| **AppImage** `dist/ebook-reader-x86_64.AppImage` | **54 MB**（55,802,360 B；SquashFS 4.0 / zstd）→ **满足 NFR-011（≤150 MB）** |
+| AppImage 启动到首屏（本轮复测，offscreen，合集 135 节 / 134 行目录） | FUSE 直接启动 **0.52 s**（首屏就绪 203 ms）；`APPIMAGE_EXTRACT_AND_RUN=1` **0.57 s**（首屏就绪 132 ms）——均满足 NFR-001 |
 | 应用冷启动（实测） | 打开书 3 ms + 单节排版 + 首页渲染；真实 Wayland 下**首屏就绪 188 ms**，offscreen 下 75–102 ms（NFR-001 目标 500 ms） |
 | 打包产物启动到首屏（本轮复测，`build.sh` 冒烟测试的计时，offscreen，合集 135 节 / 134 行目录） | 文件夹版 **0.35 s**（首屏就绪 138 ms），单文件版 **1.05 s**（首屏就绪 162 ms；差额是解包）——开启目录补行后仍满足 NFR-001（0.5 s 目标 / 1.0 s 上限） |
-| **打包后「文件夹版」** `dist/ebook-reader-dir/` | **169.4 MB**（未压缩；日常使用与 AppImage 的底料） |
-| **打包后「单文件版」** `dist/ebook-reader` | **62.1 MB**（PyInstaller CArchive 自带 zlib 压缩）→ **满足 NFR-011（≤150 MB）** |
+| **打包后「文件夹版」** `dist/ebook-reader-dir/` | **162 MB**（`du -sh`；未压缩；日常使用与 AppImage 的底料） |
+| **打包后「单文件版」** `dist/ebook-reader` | **58 MB**（60,668,784 B；PyInstaller CArchive 自带 zlib 压缩）→ **满足 NFR-011（≤150 MB）** |
 | 剪裁收益 | 未剪裁 **259 MB** → 剪裁后 164 MB（**−95 MB**）：GTK 栈约 25 MB、重复的系统 `libicudata.so.78` 32 MB、未使用的控件样式（`FluentWinUI3` 单项 8.3 MB）等 |
 | 打包产物启动（真实 Wayland） | 文件夹版 **0.27 s**、单文件版 **1.00 s**（NFR-001 上限 1.0 s，见 ADR-013 的代价说明） |
 | 运行时依赖数量 | 1（`PySide6-Essentials`） |
@@ -1238,12 +1240,16 @@ PageView.qml:23: Unable to assign null to QImage
 |---|---|
 | 打包器 | PyInstaller **6.22.3**（官方 classifiers 覆盖 Python 3.8–3.15；本项目运行在 Python **3.14.7**） |
 | 入口 | `packaging/entry.py` —— `__main__.py` 用的是相对导入，不能直接作为 PyInstaller 的分析入口（它会被当作顶层 `__main__` 执行，包上下文不存在） |
-| 构建 | `packaging/build.sh`，两种产物合计约 2 分钟 |
+| 构建 | `packaging/build.sh`，两种 PyInstaller 产物合计约 2 分钟；`packaging/build-appimage.sh` 组装 AppDir + SquashFS 压缩约 **3.3 秒**（16 核，`--no-smoke`），冒烟测试另计 |
 | 剪裁 | `packaging/bundle.py`：按表剔除 **1303** 个数据项 + **44** 个二进制项，再按可达性剪除 **63** 个孤立共享库 |
-| 产物 | `dist/ebook-reader` 62.1 MB（单文件）/ `dist/ebook-reader-dir/` 169.4 MB（文件夹） |
-| 依赖完整性 | `bundle.py check`：218 个 ELF、**0 个未解析库**、**0 个未解析 QML import** |
-| 真实 Wayland 实测 | 三种启动方式（文件夹版带书 / 文件夹版无参数 / 单文件版带书）均 0 错误。加入右键菜单、目录栏默认展开、状态栏「目录」开关与「目录不自动收起」之后用 `packaging/build.sh` 的冒烟测试复测：三种方式仍 0 错误，启动到首屏日志 0.32 s（文件夹）/ 1.00 s（单文件），首屏就绪 108 ms / 102 ms —— 此前记录的 86–92 ms 是目录栏默认收起时的版本，ADR-015 让开书时多出一次重排，代价即在此处可见（NFR-001 仍余量充足）。**注**：该次复测在分页原型期，日志行为 `first page ready`；ADR-016 之后同一处日志已改为 `first window ready`（首屏窗口就绪），时间量不变 |
+| 产物 | `dist/ebook-reader` 58 MB（60,668,784 B，单文件）/ `dist/ebook-reader-dir/` 162 MB（文件夹）/ `dist/ebook-reader-x86_64.AppImage` **54 MB**（55,802,360 B，SquashFS 52.31 MB + runtime） |
+| AppImage 组成 | `AppRun`（`exec` 到 `usr/bin/ebook-reader`）+ `ebook-reader.desktop`（`Exec=ebook-reader %f`，无 `TryExec`）+ SVG/256 px PNG 图标 + `.DirIcon`；appimagetool continuous build 313，type2 runtime `8f39b89` |
+| AppImage 冒烟 | FUSE 直接打开指定书 / 无参数选书 / `APPIMAGE_EXTRACT_AND_RUN=1` 打开指定书：三种方式均 **0 错误**；启动到首屏 **0.52 s / — / 0.57 s**，首屏就绪 **203 ms / — / 132 ms**；`--appimage-extract` 可读回 `.desktop` |
+| 依赖完整性 | `bundle.py check`（AppDir payload）：194 个 ELF、68 个符号链接、**0 个未解析库**、**0 个未解析 QML import**、实体占用 160 MB |
+| 真实 Wayland 实测（PyInstaller 双产物） | 三种启动方式（文件夹版带书 / 文件夹版无参数 / 单文件版带书）均 0 错误。加入右键菜单、目录栏默认展开、状态栏「目录」开关与「目录不自动收起」之后用 `packaging/build.sh` 的冒烟测试复测：三种方式仍 0 错误，启动到首屏日志 0.32 s（文件夹）/ 1.00 s（单文件），首屏就绪 108 ms / 102 ms —— 此前记录的 86–92 ms 是目录栏默认收起时的版本，ADR-015 让开书时多出一次重排，代价即在此处可见（NFR-001 仍余量充足）。**注**：该次复测在分页原型期，日志行为 `first page ready`；ADR-016 之后同一处日志已改为 `first window ready`（首屏窗口就绪），时间量不变 |
 | 回归 | 单元 + 集成测试 **156 项全绿**（0.95 s + 11.85 s；当时的分页原型期数量；ADR-016 之后为 171 项 / 0.92 s + 33.05 s，ADR-017 与缺陷 18~23 之后为 227 项 / 0.95 s + 35.59 s，缺陷 25 之后为 241 项 / 1.22 s + 39.92 s，ADR-020 之后为 250 项 / 1.07 s + 40.49 s，ADR-021 与 FR-077 之后为 **257 项 / 1.10 s + 40.73 s**，见 §12.7） |
+
+**AppImage 的网络依赖。** `appimagetool` 会自行从 GitHub 下载 type2 runtime，而本机到 GitHub release 直连超时；`build-appimage.sh` 因此依次尝试官方 URL、`ghfast.top`、`ghproxy.net`，并把手动/缓存下来的 runtime 用 `--runtime-file` 显式交给 appimagetool。工具缓存在 `build/tools/`，但 `build.sh` 会清空 `build/`，所以 `--build` 之后需要重新下载。AppImage 的 `.desktop` 刻意不写 `TryExec`：宿主 PATH 上并没有 `ebook-reader`，写了会让 KDE 把菜单项当成不可用而隐藏。
 
 **剪裁为什么用「可达性」而不是手写清单。** `Qt/plugins/**` 与 `Qt/qml/**` 都是运行时按路径 / `dlopen` 加载的，没有任何 `DT_NEEDED` 指向它们，因此无法用依赖图自动发现，只能显式列在 `PLUGIN_FAMILIES` / `PLUGIN_FILES` / `QML_MODULES` 三张表里。反过来，这份「剔除」一旦生效，**只被它们引用的共享库就变成了孤儿**（典型例子：`libqgtk3.so` 一个插件拖进整个 GTK 栈，以及被 GTK 链顺带拖进来的系统 `libicudata.so.78`——与 venv 自带的 `.73` 重复）。因此第二层用可达性遍历：以 `Qt/plugins/**`、`Qt/qml/**`、`PySide6/*.abi3.so`、`lib-dynload/**` 为根，沿 `DT_NEEDED` 求闭包，只在 `PySide6/Qt/lib/` 与 `_internal/` 顶层两个目录里剪除不可达的库。剪裁范围刻意收窄，是因为插件 / QML 模块 / Python 扩展都不在依赖图里，全量剪除会把它们删光。
 
@@ -1258,7 +1264,7 @@ module "Qt.labs.folderlistmodel" is not installed
 **两道防线**（都直接来自这次踩坑，缺一不可）：
 
 1. **`bundle.py check_qml_imports`** —— 用打包产物里每个 `qmldir` 的 `module X` 声明构建「可用模块集」，再扫描全部 `.qml` / `qmldir` 的 `import` 与 `depends`，报出解析不了的模块。这是**唯一**能自动发现此类问题的手段：Qt 只打一条 console warning，应用照常运行，退出码为 0。该检查已能复现上述缺陷（在修正前的产物上返回 2 条未解析并通过退出码 1 使构建失败）。
-2. **`build.sh` 的冒烟测试必须覆盖无参数启动。** 原先只测「带书启动」，恰好绕过了唯一会触发该缺陷的代码路径；现在文件夹版同时测两条路径，单文件版测带书路径。
+2. **`build.sh` 的冒烟测试必须覆盖无参数启动。** 原先只测「带书启动」，恰好绕过了唯一会触发该缺陷的代码路径；现在文件夹版同时测两条路径，单文件版测带书路径，`build-appimage.sh` 还额外测 FUSE 直接运行与 `APPIMAGE_EXTRACT_AND_RUN=1` 回退。
 3. **计时用的日志行不能只写一次就忘。** 冒烟测试的「启动到首屏」靠 grep 控制器那行日志来计时，而 ADR-016 把那行从 `first page ready` 改成 `first window ready` 之后，grep 仍留在旧词上——于是**这个数字几轮以来一直没被测到**（脚本只是静默地不打印），而「0 错误」的断言照常通过。本轮把它修正并复测（§12.6）。教训与 ADR-016 的「一条没人问的规则等于不存在的规则」同源：**度量本身也会腐烂**，改日志文案时要连 grep 一起改。
 
 **附带确认**：`.qrc` 未采用（理由见 ADR-013）；`Qt Quick Controls` 的 style 在 `app/main.py` 中显式钉为 `Fusion`——这既让界面在不同桌面环境下渲染一致，也是能够安全剔除其余 style 实现（`Material` / `Imagine` / `Universal` / `FluentWinUI3`）的前提。

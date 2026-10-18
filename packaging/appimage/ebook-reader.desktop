@@ -1,0 +1,20 @@
+[Desktop Entry]
+Type=Application
+Version=1.2
+Name=Ebook Reader
+Name[zh_CN]=电子书阅读器
+Comment=Read EPUB books
+Comment[zh_CN]=阅读 EPUB 电子书
+# AppRun puts usr/bin on the AppImage's private root; `ebook-reader` is the
+# command name inside the image, not a path on the host.  There is deliberately
+# no TryExec: the host PATH does not contain the binary until the AppImage is
+# launched, and a TryExec that cannot be found makes KDE hide the menu entry.
+Exec=ebook-reader %f
+Icon=ebook-reader
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/epub+zip;
+Keywords=ebook;epub;reader;电子书;阅读;
+StartupNotify=true
+StartupWMClass=ebook-reader
+X-AppImage-Version=0.1.0

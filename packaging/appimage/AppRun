@@ -1,0 +1,12 @@
+#!/bin/sh
+# AppImage entry point.
+#
+# The AppImage runtime sets $APPDIR to the mounted SquashFS root.  When the
+# same tree is run unpacked (`--appimage-extract-and-run`, or a plain
+# `./squashfs-root/AppRun`), fall back to the directory this script lives in.
+# `exec` matters: the reader must own the process so Qt sees the right argv[0]
+# and the AppImage runtime can forward signals to it.
+set -eu
+
+HERE="${APPDIR:-$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)}"
+exec "$HERE/usr/bin/ebook-reader" "$@"
