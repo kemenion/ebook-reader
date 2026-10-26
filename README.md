@@ -23,7 +23,8 @@
   （`settings.kinsoku`，关掉即完全不注入，切换即时生效）
 - 图片按需解码（408 张图 / 85 MB 的书只占 ~27 MB 图片缓存）
 - **连续滚动**：一节 = 一条连续列，没有页边界；图片不被列挤扁或拉伸，标题与其正文不分离
-- 日间 / 米色 / 夜间三主题，宋体 / 黑体 / 楷体三字体；三主题同一套三层表面——**纸 > 带 > 面板**
+- 日间 / 米色 / 夜间三主题，宋体 / 黑体 / 楷体三字体；**楷体（霞鹜文楷）随程序分发**，宿主没装中文字体
+  也不会退成宋体（SIL OFL 1.1，许可文本随包附带）；三主题同一套三层表面——**纸 > 带 > 面板**
   （纸是正文栏，面板是目录栏 / 大纲栏 / 菜单 / 状态栏，「带」是画在纸上的那两条条带，见下）。
   夜间是**稍深的灰底 + 浅灰字**（不是黑底，也不是近白字——深底上的近白字晃眼），**换主题当场换墨**
 - **三栏布局**：目录 ｜ 正文 ｜ 本节大纲，三栏同时可见，正文按剩余宽度重新排版
@@ -71,6 +72,10 @@ PYTHONPATH=src .venv/bin/python -m ebook_reader 你的书.epub
 
 ## 打包与分发
 
+楷体已经随包附带（霞鹜文楷，SIL OFL 1.1，许可文本 `src/ebook_reader/fonts/OFL.txt`），不需要另外
+安装字体；宋体与黑体仍使用系统字体（回退链见 `src/ebook_reader/typeset/settings.py`），源码运行时
+字体同样从 `src/ebook_reader/fonts/` 读取。
+
 源码运行只需要 PySide6；打可分发的包还需要 PyInstaller。`appimagetool` 与 AppImage runtime
 由 `build-appimage.sh` 自动下载到 `build/tools/`（先直连 GitHub，失败时改用 `ghfast.top` /
 `ghproxy.net` 镜像；也可以用 `APPIMAGETOOL` / `APPIMAGE_RUNTIME` 指向手动下载的文件）。
@@ -91,13 +96,17 @@ packaging/build-appimage.sh
 packaging/build-appimage.sh --build
 ```
 
+**改了源码之后必须重跑第 1 步。** `build-appimage.sh` 默认只压已有的 `dist/ebook-reader-dir/`，
+它自己不做 PyInstaller——所以只跑第 2 步的话，AppImage 里装的是**上一版程序**（新的快捷键、菜单行、
+文案统统不会出现，看起来像「改了没用」）。文件夹版比源码旧时脚本会打一行警告并提示加 `--build`。
+
 产物：
 
 | 产物 | 体积 | 说明 |
 |---|---:|---|
-| `dist/ebook-reader-dir/` | 162 MB | 文件夹版，启动最快 |
-| `dist/ebook-reader` | 58 MB | PyInstaller 单文件版，每次启动要解包 |
-| `dist/ebook-reader-x86_64.AppImage` | **54 MB** | 单文件可执行，基于文件夹版，满足 NFR-011（≤150 MB） |
+| `dist/ebook-reader-dir/` | 180 MB | 文件夹版，启动最快 |
+| `dist/ebook-reader` | 69 MB | PyInstaller 单文件版，每次启动要解包 |
+| `dist/ebook-reader-x86_64.AppImage` | **64 MB** | 单文件可执行，基于文件夹版，满足 NFR-011（≤150 MB）；其中 18.4 MiB 是内置楷体 |
 
 运行 AppImage：
 
@@ -117,8 +126,8 @@ AppImage 需要宿主机的 FUSE 2（Debian 13：`sudo apt install libfuse2t64`�
 APPIMAGE_EXTRACT_AND_RUN=1 ./dist/ebook-reader-x86_64.AppImage 你的书.epub
 ```
 
-实测（本机，offscreen，合集 135 节 / 134 行目录）：FUSE 直接启动到首屏 **0.52 s**（首屏就绪 203 ms）；
-`APPIMAGE_EXTRACT_AND_RUN=1` **0.57 s**（首屏就绪 132 ms）。两者都满足 NFR-001。
+实测（本机，offscreen，合集 135 节 / 134 行目录）：FUSE 直接启动到首屏 **0.47 s**（首屏就绪 166 ms）；
+`APPIMAGE_EXTRACT_AND_RUN=1` **0.63 s**（首屏就绪 127 ms）。两者都满足 NFR-001。
 
 ## 快捷键
 
@@ -131,10 +140,15 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./dist/ebook-reader-x86_64.AppImage 你的书.epub
 | `A` | 自动滚屏开关（章末自动接下一章；滚动和跳转都不停它，只有这一行 / 这个键能停） |
 | `T` / `O` / `S` | 目录 / 本节大纲 / 设置 |
 | `Ctrl` `+` / `-` | 字号 |
+| `Alt` `+` / `-` | 行距（每按一次 ±0.05，与字号同一对键的 `Alt` 版） |
 | `Ctrl+C` | 把标出的那一段重新放进剪贴板 |
 | `F11` | 全屏 |
 | `Esc` | 关闭所有面板 |
 | `Ctrl+O` / `Ctrl+Q` | 打开文件 / 退出 |
+
+字号与行距那两行里的 `+` 既可以是 `=` 键，也可以是主键盘的 `+`（键帽上那个，要按 `Shift`）：Qt 的快捷键
+**严格比对修饰键**，所以 `Ctrl+Shift++` / `Alt+Shift++` 是单独注册的另一条拼写，小键盘的 `+` 走 `Ctrl++` / `Alt++`；
+菜单的 hint 列只印较短的 `=` 版。
 
 滚轮一格滚 3 行（与键盘同一套行高，事件被接受、不再冒泡）；鼠标滚轮发的是 `angleDelta`（120 单位 = 一格），
 触控板与平滑 / 自由滚动的滚轮**只发 `pixelDelta`**，于是按像素原样位移——两种形态分开处理，无论哪一台机器都滚得动。
@@ -169,8 +183,8 @@ Qt 自己的「词」在中文里是到下一个空白为止的整段），单�
 
 ```bash
 .venv/bin/pip install pytest
-QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest        # 约 85 秒，358 项
-QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest tests/unit -q   # 纯 Python，无 GUI，195 项 / 1.1 秒
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest        # 约 83 秒，365 项
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest tests/unit -q   # 纯 Python，无 GUI，199 项 / 0.9 秒
 ```
 
 集成测试直接断言设计文档里的性能指标（单节排版 ≤ 50 ms、单窗口渲染 ≤ 20 ms）与质量指标
@@ -182,9 +196,9 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest tests/unit -q   # 纯 Pytho
 换主题后**画面上的墨色**真的换了、关掉避头尾开关后页面上的文本里不再有 WJ、按 `A` 之后文字真的按报出的速度在动
 且**滚轮 / 按键 / 滚动条 / 跳转都停不下它**、拖拽与划线期间原地不动而松手继续、章末它自己接着走而全书末尾它停下、换书之后仍在漂），
 因此文档与代码不会脱节。
-集成测试每项都要真开一次 QML 窗口、打开一本真书，并用 `QTest` 打真键盘 / 滚轮 / 鼠标事件，单价约 0.51 秒；
+集成测试每项都要真开一次 QML 窗口、打开一本真书，并用 `QTest` 打真键盘 / 滚轮 / 鼠标事件，单价约 0.49 秒；
 不开窗的那几条（只排一篇合成文档，或只排参考书的最大节——换主题换墨、关避头尾开关这两条就属于后者）拉低了平均单价，
-因此 163 项约 85 秒；NFR-023 的 10 秒预算针对的是 `tests/unit` 那一套（1.1 秒）。开书后窗口最大化（FR-077），
+因此 166 项约 81 秒；NFR-023 的 10 秒预算针对的是 `tests/unit` 那一套（0.9 秒）。开书后窗口最大化（FR-077），
 所以集成套件里每项都在**最大化后的窗口**上跑（离屏屏幕 800×800），需要特定尺寸的用例用
 `conftest.set_window_size()` 先退出最大化。
 
@@ -192,11 +206,12 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest tests/unit -q   # 纯 Pytho
 
 ```
 requirement/requirements.md    需求规格（含实测基线与可测量指标）
-arch/architecture.md           架构设计（含 24 条 ADR 与 P0 实测记录）
+arch/architecture.md           架构设计（含 25 条 ADR 与 P0 实测记录）
 src/ebook_reader/
 ├── domain/                    零 Qt 依赖：EPUB 解析 + XHTML 规范化 + 避头尾
 ├── typeset/                   依赖 QtGui：文档构建 + 连续列布局 + 窗口渲染 + 图片缓存 + 选区取位/取词/条带
 ├── app/                       QML 控制器、设置持久化、启动引导
+├── fonts/                     内置楷体（霞鹜文楷）+ OFL 许可文本
 └── qml/                       界面（无业务逻辑）
 packaging/                     PyInstaller spec/build、bundle 检查、AppImage 组装
 tests/unit/ tests/integration/
@@ -253,4 +268,4 @@ tests/unit/ tests/integration/
 | 目录层级还原：平铺目录的书逐行读文档开头 1 KB（FR-012 / ADR-020） | **EPUB 3 参考书 2.3 → 14 ms**、EPUB 2 参考书 **5.3 → 16 ms**、合集参考书 **±0**（只算目录构建；`open()` 本身不变） |
 | 目录行目标文档读一次开头 ≤ 4 KB：判断是否落在**纯图片扉页**上（FR-016 / ADR-021） | `open()` + `toc` **+2~5 ms**（EPUB 3 参考书 15.6 → 17.4 ms、EPUB 2 参考书 15.4 → 19.1 ms、合集 37.6 → 39.0 ms、新目标书 48.6 → 53.7 ms） |
 | 自动滚屏一跳（50 ms）的控制器开销（FR-094） | **19 µs**（20 跳/秒 ≈ 0.4 ms CPU/秒；中速 9 px/秒，约 3.5 s 才跨过一个 32 px 渲染量子） |
-| 测试 | **358 项 / 约 85 s / 全绿**（单元 195 项 / 1.1 s，集成 163 项 / 85 s） |
+| 测试 | **365 项 / 约 83 s / 全绿**（单元 199 项 / 0.9 s，集成 166 项 / 81 s） |

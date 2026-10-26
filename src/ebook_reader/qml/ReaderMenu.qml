@@ -400,6 +400,7 @@ Menu {
             objectName: "menuLineHeightUp"
             width: parent.width
             text: "放宽行距"
+            hint: "Alt+="
             enabled: root.cHasBook
             onTriggered: ctl && ctl.increaseLineHeight()
         }
@@ -407,6 +408,7 @@ Menu {
             objectName: "menuLineHeightDown"
             width: parent.width
             text: "收紧行距"
+            hint: "Alt+-"
             enabled: root.cHasBook
             onTriggered: ctl && ctl.decreaseLineHeight()
         }

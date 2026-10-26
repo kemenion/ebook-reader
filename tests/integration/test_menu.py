@@ -25,6 +25,7 @@ from conftest import (
     item,
     open_long_section,
     painted_colours,
+    press,
     pump,
     set_window_size,
     visible,
@@ -398,3 +399,26 @@ def test_a_row_carries_the_shortcut_it_stands_for(shell, kangpo_path: Path) -> N
     assert menu_item(window, "menuSectionTop").property("hint") == "Home"
     assert menu_item(window, "menuQuit").property("hint") == "Ctrl+Q"
     assert row(window, "字号").property("hint") == ""       # its value is in the label
+    assert menu_item(window, "menuFontSizeUp").property("hint") == "Ctrl+="
+    assert menu_item(window, "menuLineHeightUp").property("hint") == "Alt+="
+    assert menu_item(window, "menuLineHeightDown").property("hint") == "Alt+-"
+
+
+def test_the_keys_the_menu_prints_really_change_the_line_spacing(shell, kangpo_path: Path) -> None:
+    """A hint column the reader can press: `Alt+=` widens, `Alt+-` tightens (FR-033).
+
+    The pair mirrors the font size's `Ctrl±`, one modifier over, so that ``Ctrl`` moves
+    the letters and ``Alt`` the distance between the lines.  A sequence Qt cannot parse
+    is registered and never fires, which is why the keys are pressed rather than the
+    controller called (FR-071).
+    """
+    _, window, controller = shell
+    assert controller.openBook(str(kangpo_path))
+    pump(240)
+
+    before = controller.lineHeight
+    press(window, "Alt+=")
+    assert controller.lineHeight > before
+    press(window, "Alt+-")
+    press(window, "Alt+-")
+    assert controller.lineHeight < before

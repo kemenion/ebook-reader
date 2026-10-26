@@ -31,8 +31,8 @@ QML_MODULE = "EbookReader"
 #: How long Main.qml waits before it re-lays out after a resize.
 RESIZE_DEBOUNCE_MS = 140
 
-#: The key combinations the shell's shortcuts use, by the name the menu shows for
-#: them.  Key *codes* rather than the strings from Main.qml, because ``QTest`` needs
+#: The key combinations the shell's shortcuts use, by the sequence Main.qml spells.
+#: Key *codes* rather than the strings from Main.qml, because ``QTest`` needs
 #: the code: a test that sent the string would only be testing its own translation of
 #: it.  Ctrl+O and Ctrl+Q are deliberately absent - one opens a native file dialog and
 #: the other quits the application, and neither belongs in a test run.
@@ -55,6 +55,14 @@ KEYS: dict[str, tuple[Qt.Key, Qt.KeyboardModifier]] = {
     "S": (Qt.Key_S, Qt.NoModifier),
     "Esc": (Qt.Key_Escape, Qt.NoModifier),
     "Ctrl+C": (Qt.Key_C, Qt.ControlModifier),
+    # The 行距 pair: `Ctrl` moves the letters, `Alt` the distance between the lines.
+    "Alt+=": (Qt.Key_Equal, Qt.AltModifier),
+    "Alt+-": (Qt.Key_Minus, Qt.AltModifier),
+    # `+` is Shift+= on most layouts, and Qt compares the modifiers exactly, so the
+    # main keyboard's `+` arrives as Key_Plus *with* Shift - a spelling Main.qml has
+    # to register beside the bare `++`, or the cap the reader presses does nothing.
+    "Ctrl+Shift++": (Qt.Key_Plus, Qt.ControlModifier | Qt.ShiftModifier),
+    "Alt+Shift++": (Qt.Key_Plus, Qt.AltModifier | Qt.ShiftModifier),
 }
 
 _registered = False

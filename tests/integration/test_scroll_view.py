@@ -69,7 +69,15 @@ DOCUMENTED = frozenset(
         "Ctrl+Q",
         "Ctrl++",
         "Ctrl+=",
+        # `+` is Shift+= on most layouts, and Qt compares the modifiers exactly, so the
+        # main keyboard's `+` needs the shifted spelling as well (FR-033).
+        "Ctrl+Shift++",
         "Ctrl+-",
+        # Line spacing: the same ± idea as the font size, one modifier over (FR-033).
+        "Alt++",
+        "Alt+=",
+        "Alt+Shift++",
+        "Alt+-",
         "F11",
     }
 )
@@ -119,6 +127,25 @@ def test_every_registered_sequence_is_one_qt_can_parse(shell) -> None:
 
 
 # ---------------------------------------------------------------------- the keys
+
+
+def test_the_plus_key_reaches_the_shortcuts_from_the_main_keyboard(shell) -> None:
+    """`+` is Shift+= on most layouts, and Qt compares the modifiers exactly.
+
+    ``Shortcut { sequence: "Ctrl++" }`` therefore answers the keypad and little else:
+    the main keyboard sends ``Key_Plus`` *with* ``Shift``, which is the spelling
+    registered beside it.  Without that twin the cap the reader presses does nothing -
+    both pairs, the font size and the line spacing (FR-033).
+    """
+    _, window, controller = shell
+    font = controller.fontSize
+
+    press(window, "Ctrl+Shift++")
+    assert controller.fontSize > font
+
+    spacing = controller.lineHeight
+    press(window, "Alt+Shift++")
+    assert controller.lineHeight > spacing
 
 
 def test_the_arrow_keys_move_one_line(shell, kangpo_path: Path) -> None:

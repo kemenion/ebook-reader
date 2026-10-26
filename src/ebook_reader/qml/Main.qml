@@ -488,9 +488,20 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+C"; onActivated: ctl && ctl.copySelection() }
     Shortcut { sequence: "Ctrl+O"; onActivated: fileDialog.open() }
     Shortcut { sequence: "Ctrl+Q"; onActivated: Qt.quit() }
-    Shortcut { sequence: "Ctrl++"; onActivated: ctl && ctl.increaseFont() }
-    Shortcut { sequence: "Ctrl+="; onActivated: ctl && ctl.increaseFont() }
+    // `+` sits behind Shift on most layouts, and Qt compares the modifiers exactly, so
+    // "Ctrl++" on its own only answers the keypad - or a layout where `+` needs no
+    // Shift.  The main keyboard sends the shifted spelling, so that one has to be
+    // registered too, or the key the reader sees on the cap does nothing (FR-033).
+    Shortcut { sequences: ["Ctrl++", "Ctrl+=", "Ctrl+Shift++"]
+               onActivated: ctl && ctl.increaseFont() }
     Shortcut { sequence: "Ctrl+-"; onActivated: ctl && ctl.decreaseFont() }
+    // Line spacing is the font size's twin, one modifier over: `Ctrl` moves the letters,
+    // `Alt` the distance between the lines.  The menu prints the `=` spelling on its
+    // 行距 rows - a hint that does not match its sequence is a dead key - but the `+`
+    // key has to work as well, so `Alt+Shift++` is registered beside it (FR-033 / FR-071).
+    Shortcut { sequences: ["Alt++", "Alt+=", "Alt+Shift++"]
+               onActivated: ctl && ctl.increaseLineHeight() }
+    Shortcut { sequence: "Alt+-"; onActivated: ctl && ctl.decreaseLineHeight() }
     Shortcut { sequence: "F11"; onActivated: window.toggleFullScreen() }
 
     FileDialog {

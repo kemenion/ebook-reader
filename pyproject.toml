@@ -29,7 +29,7 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-ebook_reader = ["qml/*.qml", "qml/**/*.qml", "qml/shaders/*"]
+ebook_reader = ["qml/*.qml", "qml/**/*.qml", "qml/shaders/*", "fonts/*.ttf", "fonts/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

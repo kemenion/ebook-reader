@@ -12,6 +12,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterType
 from PySide6.QtQuickControls2 import QQuickStyle
 
+from ..typeset.fonts import load_bundled_fonts
 from .controller import ReaderController
 from .page_item import PageItem
 from .settings_store import SettingsStore
@@ -67,6 +68,11 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QGuiApplication([sys.argv[0]])
     app.setApplicationDisplayName("电子书阅读器")
+
+    # Before the controller and the QML engine: the kai choice asks for the bundled
+    # face by name (ADR-025), and the first document is built as soon as a book is
+    # opened.  Failure is logged and the system chain takes over - see fonts.py.
+    load_bundled_fonts()
 
     controller = ReaderController(store=SettingsStore())
     qmlRegisterType(PageItem, QML_MODULE, 1, 0, "PageItem")

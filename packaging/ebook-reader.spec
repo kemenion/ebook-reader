@@ -6,11 +6,11 @@
     dist/ebook-reader-dir/    folder build -- fast start, the AppImage payload
     dist/ebook-reader         single file  -- convenient to hand out
 
-Only our own QML sources need declaring.  The Qt side is handled by the PySide6
-hooks: importing ``PySide6.QtQml`` makes them walk the whole ``PySide6/Qt/qml``
-tree and collect every directory carrying a ``qmldir``.  That is what brings in
-the modules which appear *only* inside QML and are therefore invisible to the
-byte-code scanner -- ``QtQuick.Controls``, ``QtQuick.Layouts``,
+Only our own QML sources and the bundled font need declaring.  The Qt side is
+handled by the PySide6 hooks: importing ``PySide6.QtQml`` makes them walk the whole
+``PySide6/Qt/qml`` tree and collect every directory carrying a ``qmldir``.  That is
+what brings in the modules which appear *only* inside QML and are therefore
+invisible to the byte-code scanner -- ``QtQuick.Controls``, ``QtQuick.Layouts``,
 ``QtQuick.Dialogs``, ``QtQuick.Window``.  They cannot be listed as hidden
 imports, because they are not Python modules.
 
@@ -32,6 +32,9 @@ ONEFILE = os.environ.get("EBR_ONEFILE", "0") == "1"
 
 datas = [
     (str(ROOT / "src" / "ebook_reader" / "qml"), "ebook_reader/qml"),
+    # The Kai face and its licence (ADR-025).  The licence has to ship with the font,
+    # so both go in as one directory rather than as two separate entries.
+    (str(ROOT / "src" / "ebook_reader" / "fonts"), "ebook_reader/fonts"),
 ]
 
 hiddenimports = [

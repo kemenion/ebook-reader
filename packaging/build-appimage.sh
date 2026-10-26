@@ -106,6 +106,25 @@ download_runtime() {
     return 1
 }
 
+# A folder build older than the sources ships the previous version of the app -
+# the trap behind "I rebuilt the AppImage and nothing changed": this script
+# reuses dist/ebook-reader-dir/ unless --build is given, and PyInstaller is the
+# only thing that copies the QML and the Python.
+warn_when_stale() {
+    local payload="$1" newest
+    [[ -x "${payload}/ebook-reader" ]] || return 0
+    newest="$(
+        find "${root}/src" "${root}/packaging" -type f \
+            -newer "${payload}/ebook-reader" -print -quit 2>/dev/null
+    )"
+    [[ -n "$newest" ]] || return 0
+    {
+        echo "警告：${payload} 比源码旧（最新的改动是 ${newest}），"
+        echo "      所以这个 AppImage 里装的仍是上一次的构建。重新构建请用："
+        echo "          packaging/build-appimage.sh --build"
+    } >&2
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --build)    build_first=1 ; shift ;;
@@ -135,6 +154,10 @@ if [[ ! -x "${payload}/ebook-reader" || ! -d "${payload}/_internal" ]]; then
     echo "  packaging/build.sh --dir-only" >&2
     echo "或者使用：packaging/build-appimage.sh --build" >&2
     exit 1
+fi
+
+if [[ "$build_first" == 0 ]]; then
+    warn_when_stale "$payload"
 fi
 
 if [[ ! -x "$python" ]]; then

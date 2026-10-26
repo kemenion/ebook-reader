@@ -6,6 +6,9 @@ a family name Qt recognises and asking for it alone silently resolves to
 ``WenQuanYi Zen Hei`` - a sans face, which would have destroyed the serif look
 without any error.  Only the names below are known to resolve to the intended
 face, and Qt keeps walking the chain when the first entry is absent (R-06).
+
+The kai chain is no longer at the mercy of the host: its first entry is 霞鹜文楷,
+which ships with the reader and is registered at start-up (``fonts.py``, ADR-025).
 """
 
 from __future__ import annotations
@@ -16,6 +19,8 @@ from typing import Any, TypeVar
 
 from PySide6.QtCore import QPointF, QSizeF
 from PySide6.QtGui import QColor
+
+from .fonts import BUNDLED_KAI_FAMILY
 
 __all__ = [
     "FontChoice",
@@ -53,7 +58,12 @@ SANS_STACK: tuple[str, ...] = (
     "sans-serif",
 )
 
+#: The first entry is the face that ships with the reader (ADR-025) and is registered at
+#: start-up, so a machine with no Chinese Kai installed still shows a Kai instead of
+#: sliding down the chain into a serif.  The system names below it stay as the fallback
+#: for a build whose font data is missing and for glyphs the bundled face lacks.
 KAI_STACK: tuple[str, ...] = (
+    BUNDLED_KAI_FAMILY,
     "AR PL UKai CN",
     "KaiTi",
     "STKaiti",

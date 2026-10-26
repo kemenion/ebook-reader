@@ -179,6 +179,7 @@ Rectangle {
                       "Home / End：本卷开头 / 结尾\n" +
                       "[ / ]：上一章 / 下一章\n" +
                       "Ctrl + / Ctrl −：字号\n" +
+                      "Alt + / Alt −：行距\n" +
                       "T：目录   O：本节大纲   S：设置\n" +
                       "Esc：关闭面板   F11：全屏\n" +
                       "Ctrl+Q：退出"

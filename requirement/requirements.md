@@ -175,11 +175,11 @@
 | FR-030 | 中文段落**两端对齐**（`AlignJustify`） | P0 | 目视：右侧齐平 |
 | FR-031 | **避头尾（禁则）**：`。，、；：！？）》」』〕】…—` 不出现在行首；`《（「『〔【` 不出现在行尾。禁则开关（设置 `kinsoku`）关掉即整段不注入 WJ，切换即时生效——它落在**解析层**，改它等于重新解析（ADR-005 / 缺陷 29） | P0 | 目视 + 单元测试（对应架构 ADR-005）；开关真的通到页面上由 `test_typeset.py`（`test_turning_avoid_head_tail_off_reaches_the_pages`）守 |
 | FR-032 | 首行缩进 2 个字符宽度（可调） | P0 | 目视 |
-| FR-033 | 行距可调，默认 1.75 倍 | P0 | 目视 |
+| FR-033 | 行距可调，默认 1.75 倍：步进 0.05，夹在 1.0–3.0（`SettingsStore` 归一化）；三个入口——右键菜单「行距」子菜单、设置抽屉的 ±/滑块、**`Alt` `+` / `-`**（`Alt+=` / `Alt++` / `Alt+Shift++` 放宽、`Alt+-` 收紧，与字号的 `Ctrl±` 是同一对键的 `Alt` 版，菜单两行照抄同一拼写；`+` 在多数布局上要按 `Shift`，而 Qt 严格比对修饰键，移位拼写因此必须单独注册，否则主键盘上的 `+` 是死键） | P0 | `test_menu.py`（菜单两行标出的快捷键**真按键**后行距真的放宽 / 收紧）+ `test_scroll_view.py`（四条序列 `QKeySequence` 都能解析；主键盘的 `+`（带 `Shift`）真的能改字号与行距）+ 目视 |
 | FR-034 | 段落间距可调，默认 0.3em | P1 | 目视 |
 | FR-035 | 内容边距可调（上 / 下 / 左 / 右），默认上 48px / 左右 72px | P1 | 目视；`test_margin_change_is_a_geometry_change` |
 | FR-036 | 字号可调（12–32px 连续或档位） | P0 | 实时生效 |
-| FR-037 | 字体可选（衬线 / 黑体 / 楷体），带**字体回退链**以兼容 Windows | P0 | Windows 不崩字体 |
+| FR-037 | 字体可选（衬线 / 黑体 / 楷体），带**字体回退链**以兼容 Windows；**楷体随二进制分发**（霞鹜文楷，SIL OFL 1.1，启动时 `QFontDatabase.addApplicationFont` 注册，见 ADR-025），系统字体只作后备 | P0 | 不装任何中文字体的机器上点「楷体」仍是楷体（`test_bundled_font.py` + `test_font_resolution.py`：`QFontInfo` 解析到内置家族；`test_the_bundled_kai_face_ships_with_the_package`） |
 | FR-038 | 标题字号按层级递减，与正文有合理间距 | P1 | 目视 |
 | FR-039 | 图片宽度不超过内容区宽度；超高图片按比例缩到**一屏之内**（页框高 × 0.94） | P0 | 图不溢出、不拉伸（`Style.image_format`，`test_no_figure_is_squeezed_or_overlapped_by_the_column`） |
 | FR-040 | 支持半角/全角标点样式切换 | P2 | — |
@@ -307,7 +307,7 @@
 | ID | 指标 | 目标值 |
 |---|---|---|
 | NFR-022 | 核心逻辑（解析/规范化/避头尾/**连续列布局**）与 Qt UI **解耦**，可在无 GUI 环境下单元测试 | 必须满足 |
-| NFR-023 | 重点单元测试可在 **10 秒内**跑完 | 必须满足（① `tests/unit` 纯 Python 套件 **195 项实测 1.1–1.3 s**（三轮 1.29 / 1.25 / 1.11 s）；② 集成套件另计——它每项都要真开一次 QML 窗口、打开一本真书，并用 `QTest` 打真键盘 / 滚轮 / 鼠标事件，**163 项实测约 85 s**，见 `arch/architecture.md` §12.7） |
+| NFR-023 | 重点单元测试可在 **10 秒内**跑完 | 必须满足（① `tests/unit` 纯 Python 套件 **199 项实测 0.95–1.01 s**（两轮 1.01 / 0.95 s）；② 集成套件另计——它每项都要真开一次 QML 窗口、打开一本真书，并用 `QTest` 打真键盘 / 滚轮 / 鼠标事件，**164 项实测约 81 s**，见 `arch/architecture.md` §12.7） |
 | NFR-024 | 每个模块职责单一，单文件 ≤ 400 行 | 尽量满足。**两个文件超线**：`domain/html/sanitizer.py` 807 行、`domain/epub/book.py` 846 行（后者因 FR-016 / ADR-021 的阅读单元划分再增）。它们各自是一件事（「脏 HTML → Block」「把一本 EPUB 组装成可读的节」），拆开会让共享的缓存与嗅探状态散到两处；其余模块均在 400 行以内，`typeset/` 与 `app/` 无一超线 |
 | NFR-025 | 关键设计决策以 ADR 形式记录（见 `arch/architecture.md`） | 必须满足 |
 
