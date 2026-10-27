@@ -121,6 +121,10 @@ Item {
         objectName: "pagePointer"
         anchors.fill: parent
         acceptedButtons: Qt.LeftButton
+        // The pointer has two jobs here: the two gestures below while a button is held,
+        // and resting on a word while none is - which is the word card (FR-095).  A
+        // MouseArea only reports hover when it asks for it.
+        hoverEnabled: true
         // True while the gesture in progress is a Shift drag.
         property bool marking: false
         cursorShape: marking ? Qt.IBeamCursor
@@ -139,7 +143,15 @@ Item {
         }
 
         onPositionChanged: function (mouse) {
-            if (!root.ctl || !pressed) {
+            if (!root.ctl) {
+                return
+            }
+            if (!pressed) {
+                // Resting or crossing, not dragging: the controller keeps the point and
+                // restarts its dwell timer, and does nothing else until the pointer has
+                // been still long enough (FR-095).  Whether that ends in a card is the
+                // 悬停查词 switch in the right-click menu - nothing this item knows about.
+                root.ctl.hoverMoved(mouse.x, mouse.y)
                 return
             }
             if (marking) {
@@ -148,6 +160,10 @@ Item {
                 root.ctl.dragTo(mouse.y)
             }
         }
+
+        // Off the page - including onto the card itself, which is why the controller does
+        // not take the card down on this (FR-095).
+        onExited: if (root.ctl) { root.ctl.hoverLeft() }
 
         onReleased: function (mouse) {
             if (!root.ctl) {
@@ -333,6 +349,33 @@ Item {
             anchors.fill: parent
             cursorShape: Qt.PointingHandCursor
             onClicked: if (root.ctl) { root.ctl.goToNextSection() }
+        }
+    }
+
+    // 查词卡片 (FR-095).  Anchored to the *pointer* rather than to the word: the word's
+    // own rectangle would mean mapping the document's coordinates onto the page a second
+    // time, and the pointer already is a place on the page - it is the thing the reader
+    // pointed with.
+    //
+    // Below and to the right of the pointer, clear of the word it explains; flipped above
+    // it when there is no room below, and held inside the column's margins horizontally
+    // so that a word near the right edge cannot push the card off the page.
+    DictionaryPopup {
+        id: dictionaryPopup
+        ctl: root.ctl
+        z: 3
+
+        x: Math.max(root.labelMargin,
+                    Math.min((root.ctl ? root.ctl.lookupAnchorX : 0) + 10,
+                             root.width - width - root.labelMargin))
+        y: {
+            if (!root.ctl) {
+                return 0
+            }
+            const below = root.ctl.lookupAnchorY + pointerGap
+            return below + height <= root.height - root.cBottomMargin
+                 ? below
+                 : Math.max(root.cTopMargin, root.ctl.lookupAnchorY - pointerGap - height)
         }
     }
 }

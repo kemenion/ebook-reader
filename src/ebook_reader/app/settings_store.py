@@ -4,9 +4,10 @@ The file is plain JSON under the XDG config directory, so it stays readable,
 hand-editable and easy to debug.  Every read is defensive: a corrupted or
 partially written file must degrade to defaults rather than prevent startup.
 
-Beyond the typography the reader chose, the ``layout`` section holds the two
+Beyond the typography the reader chose, the ``layout`` section holds the
 preferences that describe *how* they read rather than what the text looks like: the
-width of the side panel (FR-078) and the pace of the auto-scroll (FR-094).
+width of the side panel (FR-078), the pace of the auto-scroll (FR-094) and whether
+pointing at a word raises its card (FR-095).
 """
 
 from __future__ import annotations
@@ -167,6 +168,28 @@ class SettingsStore:
         nothing.
         """
         self._layout()["auto_scroll_pace"] = str(pace)
+
+    def dictionary_enabled(self) -> bool:
+        """Whether pointing at a word raises its card; ``True`` before it is chosen.
+
+        On by default, and remembered like the panel width and the pace: the card only
+        appears where the pointer *rests* for ``_LOOKUP_DWELL_MS``, so a page does not
+        flash cards while the mouse crosses it, and a reader who would rather have none
+        switches it off once and keeps it off (FR-095).  Anything but a boolean - a
+        hand-edited file, or one written by a later version - falls back to the default
+        rather than being guessed at.
+        """
+        value = self._layout().get("dictionary_enabled")
+        return value if isinstance(value, bool) else True
+
+    def set_dictionary_enabled(self, enabled: bool) -> None:
+        """Remember the 悬停查词 switch (FR-095).
+
+        Whether a card is *on screen* is not remembered, only whether pointing at a word
+        should raise one - the same split as the auto-scroll: a preference outlives the
+        session, a moment does not.
+        """
+        self._layout()["dictionary_enabled"] = bool(enabled)
 
     def book_state(self, book_path: str | os.PathLike[str]) -> BookState:
         entry = self._books().get(self._book_key(book_path))

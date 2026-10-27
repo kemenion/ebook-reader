@@ -23,6 +23,7 @@ from PySide6.QtCore import Property, QObject, QRectF, QSizeF, QTimer, Signal, Sl
 from PySide6.QtGui import QColor, QGuiApplication, QImage, QTextDocument
 
 from ..domain import BookError, EpubBook
+from ..domain.lexicon import Lexicon, Lookup, lookup_keys, open_bundled
 from ..domain.models import TocEntry
 from ..typeset import (
     FontChoice,
@@ -56,6 +57,18 @@ _WHEEL_LINES = 3
 
 #: How many pixels the margin control adds or removes per step.
 _MARGIN_STEP = 12
+
+#: How long the pointer must rest on a word before its card appears (FR-095).
+#:
+#: The gesture is *resting*, with no key to hold: something has to tell a deliberate
+#: hover from the pointer crossing the page on its way to the scroll bar or the status
+#: bar, and that something is this number.  300 ms is a third of a second - long enough
+#: that a crossing never stops anywhere, short enough that a reader who has found the
+#: word they do not know sees the card while their eyes are still on it.  It was 120 ms
+#: while `Ctrl` was held, where the key itself was the declaration of intent; without it
+#: the dwell has to carry that meaning alone, and a shorter one made cards flash at
+#: every pause of the mouse.
+_LOOKUP_DWELL_MS = 300
 
 #: One row of a map column, in pixels: the floor both ``TocSidebar.qml`` and
 #: ``OutlinePanel.qml`` give a row (``Math.max(38, title + 16)``), which is what a
@@ -265,6 +278,13 @@ class ReaderController(QObject):
     #: The bands a selection is drawn in are part of the page, so this is announced both
     #: when the passage changes and when the window moves (FR-070).
     selectionChanged = Signal()
+    #: The word card appeared, changed word or went away, or the point it points at moved
+    #: with the page (FR-095).
+    lookupChanged = Signal()
+    #: 悬停查词 went on or off (FR-095): the right-click menu's tick, and nothing else -
+    #: the card itself only listens to `lookupChanged`, because a switch that is off can
+    #: never have a card to show.
+    dictionaryChanged = Signal()
 
     def __init__(self, parent: QObject | None = None, store: SettingsStore | None = None) -> None:
         super().__init__(parent)
@@ -334,6 +354,30 @@ class ReaderController(QObject):
         #: being thrown away - which is what keeps the slow pace from standing still.
         self._auto_pending = 0.0
         self._auto_last = 0.0
+        #: The word card (FR-095): where the pointer is resting, and what the dictionary
+        #: said about the word under it.
+        #:
+        #: The point is kept while the switch is off too: turning the card back on should
+        #: cost no pointer movement, and nothing is looked up until it is on.
+        self._hover_point: tuple[float, float] | None = None
+        #: The 悬停查词 switch, remembered across sessions (FR-095).  Off means the feature
+        #: is off - no dwell timer, no query, no card - rather than merely hidden.
+        self._dictionary_enabled = self._store.dictionary_enabled()
+        #: The word last asked about.  Resting on a word costs one query, not one per
+        #: pointer event - and a word the file does not have is remembered too, so a
+        #: still pointer on an unknown word does not keep asking.
+        self._lookup_asked = ""
+        self._lookup: Lookup | None = None
+        self._lookup_anchor = (0.0, 0.0)
+        #: Opened lazily by ``Lexicon.lookup``: a reader who never points at a word never
+        #: opens the file, and a test never needs the data to exist.
+        self._lexicon: Lexicon = open_bundled()
+        #: A single shot, restarted by every pointer event: the word is looked up once the
+        #: pointer has *rested*, which is the gesture, rather than on the way past.
+        self._lookup_timer = QTimer(self)
+        self._lookup_timer.setSingleShot(True)
+        self._lookup_timer.setInterval(_LOOKUP_DWELL_MS)
+        self._lookup_timer.timeout.connect(self._on_lookup_dwell)
         #: When the resume point was last written, for the throttle in
         #: :meth:`_publish_view`.  Zero, so the first move always writes.
         self._saved_at = 0.0
@@ -791,6 +835,206 @@ class ReaderController(QObject):
 
     selectionRects = Property(list, _get_selection_rects, notify=selectionChanged)
 
+    # ---------------------------------------------------------------- word card
+
+    def _get_dictionary_enabled(self) -> bool:
+        return self._dictionary_enabled
+
+    #: Whether pointing at a word raises its card (FR-095).  The right-click menu shows it
+    #: as a tick; `DictionaryPopup.qml` needs nothing extra - with the switch off no card
+    #: is ever put up, so its own `lookupVisible` binding already says "nothing here".
+    dictionaryEnabled = Property(bool, _get_dictionary_enabled, notify=dictionaryChanged)
+
+    def _get_lookup_visible(self) -> bool:
+        return self._lookup is not None
+
+    #: Whether the card is up (FR-095).  The one property ``DictionaryPopup.qml`` binds its
+    #: ``visible`` to, so a card can never be drawn without content behind it.
+    lookupVisible = Property(bool, _get_lookup_visible, notify=lookupChanged)
+
+    def _get_lookup_form(self) -> str:
+        """The word as it stood on the page - ``""`` when no card is up."""
+        return self._lookup.form if self._lookup is not None else ""
+
+    lookupForm = Property(str, _get_lookup_form, notify=lookupChanged)
+
+    def _get_lookup_word(self) -> str:
+        """The headword being explained: ``go`` after the pointer rested on ``went``."""
+        return self._lookup.word if self._lookup is not None else ""
+
+    lookupWord = Property(str, _get_lookup_word, notify=lookupChanged)
+
+    def _get_lookup_phonetic(self) -> str:
+        """The pronunciation in IPA, slashes and all; empty when the entry has none."""
+        return self._lookup.phonetic if self._lookup is not None else ""
+
+    lookupPhonetic = Property(str, _get_lookup_phonetic, notify=lookupChanged)
+
+    def _get_lookup_senses(self) -> list[str]:
+        """The gloss lines, already cut to what a small card holds (``glosses.py``)."""
+        return list(self._lookup.senses) if self._lookup is not None else []
+
+    lookupSenses = Property(list, _get_lookup_senses, notify=lookupChanged)
+
+    def _get_lookup_anchor_x(self) -> float:
+        """Where the card points, in the page area's own coordinates (FR-095).
+
+        The page's rather than the window's: the shell puts the card inside the same item
+        the pointer is in, so no margin or panel width has to be added twice.
+        """
+        return self._lookup_anchor[0]
+
+    lookupAnchorX = Property(float, _get_lookup_anchor_x, notify=lookupChanged)
+
+    def _get_lookup_anchor_y(self) -> float:
+        return self._lookup_anchor[1]
+
+    lookupAnchorY = Property(float, _get_lookup_anchor_y, notify=lookupChanged)
+
+    @Slot(float, float)
+    def hoverMoved(self, x: float, y: float) -> None:
+        """The pointer moved over the page with no button held (FR-095).
+
+        Deliberately the cheapest thing in this file: two fields, two branches and a timer
+        restart.  It runs on every pointer event of a page-wide hover, so nothing that
+        costs a hit test, a query or a signal happens here - all of that is left to
+        :meth:`_on_lookup_dwell`, once the pointer has rested for
+        :data:`_LOOKUP_DWELL_MS`.
+
+        With the switch off the point is still remembered but no timer is started: the
+        reader asked for no cards, so the dictionary is not consulted and there is nothing
+        to take down.
+        """
+        self._hover_point = (float(x), float(y))
+        if not self._dictionary_enabled:
+            if self._lookup is not None:
+                self._hide_lookup()
+            return
+        if self._page_covered():
+            return
+        self._lookup_timer.start()
+
+    @Slot()
+    def hoverLeft(self) -> None:
+        """The pointer left the page: nothing is under it any more (FR-095).
+
+        The card is *not* taken down here.  Leaving the page is also what happens when the
+        pointer steps from the page onto the card itself, and a card that vanished as soon
+        as the reader moved towards it to read it would be unusable.
+        """
+        self._hover_point = None
+        self._lookup_timer.stop()
+        self._lookup_asked = ""
+
+    @Slot()
+    def hideLookup(self) -> None:
+        """Take the word card down (FR-095): the window lost the focus.
+
+        A card still explaining a word in a window the reader has looked away from is an
+        answer to a question nobody is asking any more.  Nothing else is touched - the
+        page, the point the pointer last rested on and the switch all stay as they are, so
+        coming back and moving the pointer a hair is enough to bring the card back.
+        """
+        self._hide_lookup()
+
+    @Slot(bool)
+    def setDictionaryEnabled(self, enabled: bool) -> None:
+        """Turn 悬停查词 on or off, and remember the choice (FR-095).
+
+        Off is not "hidden" but *off*: the dwell timer stops, the card goes away and no
+        query is ever made, so a reader who would rather read undisturbed pays nothing for
+        the feature existing.  On says so in the status bar - a switch whose only sign of
+        life is a tick in a menu that has just closed leaves the reader unsure whether
+        pointing at a word now does anything.
+
+        Remembered across sessions, like the auto-scroll pace: this is a reading
+        preference, not a mode of the current page (``SettingsStore.dictionary_enabled``).
+        """
+        enabled = bool(enabled)
+        if enabled == self._dictionary_enabled:
+            return
+        self._dictionary_enabled = enabled
+        self._store.set_dictionary_enabled(enabled)
+        self._store.save()
+        if not enabled:
+            # Nothing may be left on screen, and no lookup may be in flight: `_hide_lookup`
+            # stops the timer as well as clearing the card.
+            self._hide_lookup()
+        self.dictionaryChanged.emit()
+        self.statusMessage.emit(
+            "悬停查词已开启：把鼠标停在英文单词上即可看到释义"
+            if enabled
+            else "悬停查词已关闭"
+        )
+        _log.debug("dictionary enabled=%s", enabled)
+
+    @Slot()
+    def toggleDictionary(self) -> None:
+        """The other end of the switch: on if it is off, off if it is on (the menu row)."""
+        self.setDictionaryEnabled(not self._dictionary_enabled)
+
+    def _on_lookup_dwell(self) -> None:
+        """The pointer has rested: ask the dictionary about the word under it (FR-095)."""
+        if not self._dictionary_enabled or self._hover_point is None or self._page_covered():
+            return
+        keys = lookup_keys(self._word_at(*self._hover_point))
+        if not keys:
+            self._hide_lookup()
+            return
+        if keys[0] == self._lookup_asked:
+            return
+        answer = self._lexicon.lookup(keys)
+        if answer is None:
+            # `_hide_lookup` forgets the key, so a miss sets it *after* clearing - that is
+            # what stops a still pointer over an unknown word from querying on every event
+            # while still letting the same word work again once the pointer has left it.
+            self._hide_lookup()
+            self._lookup_asked = keys[0]
+            return
+        self._lookup_asked = keys[0]
+        self._lookup = answer
+        self._lookup_anchor = self._hover_point
+        self.lookupChanged.emit()
+
+    def _hide_lookup(self) -> None:
+        """Take the card down, if it is up, and forget which word it was about.
+
+        Cheap enough to call from every hook that moves the page: with no card on screen
+        it touches two fields and returns before any signal.
+        """
+        self._lookup_asked = ""
+        self._lookup_timer.stop()
+        if self._lookup is None:
+            return
+        self._lookup = None
+        self.lookupChanged.emit()
+
+    def _page_covered(self) -> bool:
+        """Whether a panel is drawn *over* the page - no card while one is (FR-095).
+
+        Only the settings drawer does that: it floats above the right-hand side of the
+        text.  The contents and outline columns take room *beside* the page instead, so
+        the word under the pointer is still fully visible and still worth explaining -
+        and a reader who keeps the contents open (which is how most books open, FR-013)
+        must not lose the dictionary over it.
+        """
+        return self._settings_visible
+
+    def _word_at(self, x: float, y: float) -> str:
+        """The word under a point on the page, as plain text (FR-095).
+
+        The same two steps a double click takes - the point through Qt's hit test, then
+        the run around it - because the card has to answer about exactly the word that
+        double click would copy.
+        """
+        document = self._document()
+        if document is None:
+            return ""
+        start, end = word_range(document, self._position_at_page(x, y))
+        if start >= end:  # between two words, or out in the margin
+            return ""
+        return selected_text(document, start, end)
+
     # ------------------------------------------------------------------ panels
 
     def _get_toc_visible(self) -> bool:
@@ -1080,6 +1324,7 @@ class ReaderController(QObject):
         self._scroll_offset = 0.0
         self._toc_flat = []
         self._toc_row = -1
+        self._hide_lookup()
         # Columns belong to the book that was open, so they go with it.  The
         # settings drawer is book-independent and stays where the reader left it.
         self._toc_visible = False
@@ -1363,6 +1608,9 @@ class ReaderController(QObject):
         offset = max(0.0, min(float(offset), self.scrollMax))
         if abs(offset - self._scroll_offset) < _OFFSET_EPSILON:
             return
+        # The word the pointer was resting on has moved with the page, so the card now
+        # points at a place the reader is not pointing at (FR-095).
+        self._hide_lookup()
         self._scroll_offset = offset
         self._publish_view(remember=remember)
 
@@ -1415,6 +1663,10 @@ class ReaderController(QObject):
         """
         self._drag_origin = (float(y), self._scroll_offset)
         self._drag_moved = False
+        # A press takes the word card down: the reader is about to move the page, and a
+        # card that stayed put would be pointing at a line that is going elsewhere
+        # (FR-095).
+        self._hide_lookup()
         # A gesture is starting, so whatever the last one left behind is not this one's.
         # A double click's release is the case: it must not be told apart from a click by
         # a flag an earlier gesture set (FR-070).
@@ -1483,6 +1735,7 @@ class ReaderController(QObject):
         self._sel_anchor = position
         self._sel_start = position
         self._sel_end = position
+        self._hide_lookup()
         self.selectionChanged.emit()
 
     @Slot(float, float)
@@ -1669,6 +1922,9 @@ class ReaderController(QObject):
         (FR-013) as soon as a reader changed the type size.
         """
         self._toc_visible = not self._toc_visible
+        # A panel covers the page, and a card left on top of it would be a card about a
+        # word the reader can no longer see (FR-095).
+        self._hide_lookup()
         self.layoutChanged.emit()
 
     @Slot()
@@ -1681,6 +1937,7 @@ class ReaderController(QObject):
         if not self._outline_visible and not self._get_outline_available():
             return
         self._outline_visible = not self._outline_visible
+        self._hide_lookup()
         if self._outline_visible:
             self._settings_visible = False
         self.layoutChanged.emit()
@@ -1694,6 +1951,7 @@ class ReaderController(QObject):
         on the other side of the text and stays where it is (FR-013).
         """
         self._settings_visible = not self._settings_visible
+        self._hide_lookup()
         if self._settings_visible:
             self._outline_visible = False
         self.layoutChanged.emit()
@@ -1722,6 +1980,7 @@ class ReaderController(QObject):
             self._settings_visible = False
             self._outline_visible = False
             self.layoutChanged.emit()
+        self._hide_lookup()
         self.clearSelection()
 
     # ------------------------------------------------------------- view changes
@@ -1735,6 +1994,9 @@ class ReaderController(QObject):
             return
         self._view_size = size
         self._device_ratio = ratio
+        # A re-layout moves every word on the page, so the card's anchor would be stale
+        # and its word a different one (FR-095).
+        self._hide_lookup()
         if self._engine is None:
             return
 
@@ -1941,6 +2203,8 @@ class ReaderController(QObject):
             self._sel_anchor = None
             self._sel_start = 0
             self._sel_end = 0
+            # The word card belongs to a document too, and to a place in it (FR-095).
+            self._hide_lookup()
         self.viewChanged.emit()
         # The bands of a selection are drawn *on the page*, so moving the window moves
         # them: QML rebinds `selectionRects` from this signal too (FR-070).
@@ -2026,8 +2290,12 @@ class ReaderController(QObject):
         # First the drift, then the place: `stopAutoScroll` writes the position the
         # reader was stopped at, which is the one that matters (FR-094).
         self.stopAutoScroll()
+        self._hide_lookup()
         self._save_state()
         self._store.save()
+        # The dictionary file holds a handle until the process ends; closing it here
+        # keeps the file free for a rebuild without waiting for exit (ADR-026).
+        self._lexicon.close()
 
 
 def _flatten_toc(entries: tuple[TocEntry, ...], book: EpubBook) -> list[tuple[TocEntry, int]]:

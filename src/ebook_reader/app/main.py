@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, QUrl, Qt
+from PySide6.QtCore import QCoreApplication, QUrl
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine, qmlRegisterType
 from PySide6.QtQuickControls2 import QQuickStyle

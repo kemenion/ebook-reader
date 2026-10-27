@@ -41,6 +41,7 @@ ROWS = (
     "本节大纲",
     "设置",
     "复制",
+    "悬停查词",
     "向上滚动",
     "向下滚动",
     "上滚一屏",
@@ -256,6 +257,7 @@ def test_the_menu_shows_which_columns_are_open(
     assert not row(window, "向下滚动").property("enabled")
     assert not row(window, "设置").property("enabled")
     assert not row(window, "复制").property("enabled")     # nothing marked either
+    assert not row(window, "悬停查词").property("enabled")  # no page to point at
     assert bool(row(window, "打开文件…").property("enabled"))    # always available
 
     assert controller.openBook(str(kangpo_path))
@@ -273,6 +275,14 @@ def test_the_menu_shows_which_columns_are_open(
     assert bool(row(window, "本节大纲").property("marked"))
     controller.toggleOutline()
     assert not row(window, "本节大纲").property("marked")
+
+    # 悬停查词 is the menu's one switch that no gesture can reach: the tick follows the
+    # controller both ways, and this row is how the reader sets it (FR-095).
+    assert bool(row(window, "悬停查词").property("marked"))     # on until it is turned off
+    controller.toggleDictionary()
+    assert not row(window, "悬停查词").property("marked")
+    controller.toggleDictionary()
+    assert bool(row(window, "悬停查词").property("marked"))
 
 
 def test_the_menu_knows_whether_the_book_has_a_table_of_contents(
@@ -342,6 +352,13 @@ def test_clicking_a_row_runs_the_operation_it_names(
     click(window, centre(row(window, "目录")))
     pump(200)
     assert not controller.tocVisible
+
+    # A switch, not a one-way action: the click has to land on the controller's state,
+    # which is what the page's hover obeys (FR-095).
+    open_menu(window)
+    click(window, centre(row(window, "悬停查词")))
+    pump(200)
+    assert not controller.dictionaryEnabled
     assert warnings == []
 
 

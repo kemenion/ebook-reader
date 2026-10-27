@@ -4,10 +4,16 @@
 #   packaging/build.sh              build both artefacts
 #   packaging/build.sh --dir-only   only dist/ebook-reader-dir/
 #   packaging/build.sh --onefile    only dist/ebook-reader
+#   packaging/build.sh --no-smoke   skip the offscreen smoke tests
 #
 # Use the folder build for everyday testing: it starts without unpacking
 # anything.  The single file is convenient to copy around, but pays a one-off
 # extraction cost on every launch.
+#
+# Layout: build/pyi-* and build/logs/ hold intermediate files and logs, dist/
+# holds the artefacts, and both are wiped at the start of every run.  Build
+# tools that are expensive to obtain (appimagetool, the AppImage runtime) are
+# cached elsewhere by build-appimage.sh, in ~/.cache/ebook-reader-build/.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,14 +21,17 @@ root="$(dirname "$here")"
 python="${root}/.venv/bin/python"
 dist="${root}/dist"
 work="${root}/build"
+logs="${work}/logs"
 
 want_dir=1
 want_onefile=1
+smoke=1
 for arg in "$@"; do
     case "$arg" in
         --dir-only) want_onefile=0 ;;
         --onefile)  want_dir=0 ;;
-        -h|--help)  sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --no-smoke) smoke=0 ;;
+        -h|--help)  sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "未知参数：${arg}（试试 --help）" >&2; exit 2 ;;
     esac
 done
@@ -34,12 +43,12 @@ if ! "${python}" -c 'import PyInstaller' 2>/dev/null; then
 fi
 
 rm -rf "${work}" "${dist}"
-mkdir -p "${work}" "${dist}"
+mkdir -p "${work}" "${dist}" "${logs}"
 
 build() {  # $1: 1 for a single file, 0 for a folder
     local mode="$1" label log
     if [[ "$mode" == 1 ]]; then label="单文件"; else label="文件夹"; fi
-    log="${work}/pyinstaller-onefile${mode}.log"
+    log="${logs}/pyinstaller-$([[ "$mode" == 1 ]] && echo onefile || echo dir).log"
     printf '\n=== 构建 %s (%s) ===\n' "${label}" "$([[ $mode == 1 ]] && echo dist/ebook-reader || echo dist/ebook-reader-dir/)"
     EBR_ONEFILE="${mode}" "${python}" -m PyInstaller \
         --noconfirm --clean \
@@ -85,7 +94,7 @@ smoke_test() {  # $1: executable, $2: label, remaining: arguments for the reader
     local exe="$1" label="$2"
     shift 2
     [[ -x "$exe" ]] || return 0
-    local log="${work}/smoke-$(basename "$exe")-${label// /}.log"
+    local log="${logs}/smoke-$(basename "$exe")-${label// /}.log"
     printf '\n=== 冒烟测试 %s ===\n' "$label"
     [[ $# -gt 0 ]] && printf '参数：%s\n' "$*" || printf '参数：无（应弹出文件对话框）\n'
 
@@ -132,9 +141,13 @@ smoke_test() {  # $1: executable, $2: label, remaining: arguments for the reader
     grep -aoE 'first window ready in [0-9]+ ms' "$log" | tail -1 || true
 }
 
-smoke_test "${dist}/ebook-reader-dir/ebook-reader" "文件夹版-打开指定书" "$book"
-smoke_test "${dist}/ebook-reader-dir/ebook-reader" "文件夹版-无参数选书"
-smoke_test "${dist}/ebook-reader" "单文件版-打开指定书" "$book"
+if [[ "$smoke" == 1 ]]; then
+    smoke_test "${dist}/ebook-reader-dir/ebook-reader" "文件夹版-打开指定书" "$book"
+    smoke_test "${dist}/ebook-reader-dir/ebook-reader" "文件夹版-无参数选书"
+    smoke_test "${dist}/ebook-reader" "单文件版-打开指定书" "$book"
+else
+    echo "（--no-smoke：跳过离屏冒烟测试）"
+fi
 
 printf '\n=== 依赖完整性 ===\n'
 if [[ -d "${dist}/ebook-reader-dir" ]]; then

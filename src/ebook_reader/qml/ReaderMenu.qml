@@ -250,6 +250,20 @@ Menu {
         onTriggered: ctl && ctl.copySelection()
     }
 
+    // 悬停查词 (FR-095) is the third gesture of the page and the only one that is a
+    // *setting*: with the tick on, resting the pointer on an English word raises its card;
+    // with it off the dictionary is never consulted at all.  No key has to be held either
+    // way - `Ctrl` was the old trigger and is gone, because a reader who has found a word
+    // they do not know should not have to find a second thing first.  Greyed without a
+    // book: there is no page to point at.
+    MenuAction {
+        objectName: "menuDictionary"
+        text: "悬停查词"
+        marked: ctl ? ctl.dictionaryEnabled : false
+        enabled: root.cHasBook
+        onTriggered: ctl && ctl.toggleDictionary()
+    }
+
     MenuDivider { }
 
     // ---------------------------------------------------------------- navigation

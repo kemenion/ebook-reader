@@ -9,8 +9,8 @@ which is why the bounds are asserted at the store, not only at the drag.
 Only the layout preferences are covered here; the settings, window and per-book
 sections have their rules exercised through the controller and the shell
 (`tests/integration/`), and what this file adds is the arithmetic the *next* session
-starts from - the panel width (FR-078) and, since the auto-scroll arrived, the pace
-it runs at (FR-094).
+starts from - the panel width (FR-078), the pace the auto-scroll runs at (FR-094) and
+whether pointing at a word raises its card (FR-095).
 """
 
 from __future__ import annotations
@@ -150,3 +150,37 @@ def test_a_pace_that_is_not_even_a_name_is_not_an_error(tmp_path: Path) -> None:
     # An *unknown* name is passed through unchanged for the controller to normalise.
     path.write_text(json.dumps({"layout": {"auto_scroll_pace": "turbo"}}), encoding="utf-8")
     assert SettingsStore(path).auto_scroll_pace() == "turbo"
+
+
+def test_the_dictionary_switch_survives_a_restart(tmp_path: Path) -> None:
+    """A reader who turned the cards off does not want them back tomorrow (FR-095)."""
+    path = tmp_path / "config.json"
+    assert SettingsStore(path).dictionary_enabled()      # on until it is turned off
+
+    store = SettingsStore(path)
+    store.set_dictionary_enabled(False)
+    assert store.save()
+    assert not SettingsStore(path).dictionary_enabled()
+    # Readable and hand-editable, like everything else in the file (FR-083).
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["layout"]["dictionary_enabled"] is False
+
+
+def test_a_dictionary_switch_that_is_not_a_switch_reads_as_on(tmp_path: Path) -> None:
+    """A hand-edited file must not be able to leave the card in a state of neither.
+
+    The feature is on by default, so anything that is not a boolean - a string a reader
+    typed, a number, a null left by an editor - falls back to that default instead of
+    being guessed at (FR-083).
+    """
+    path = tmp_path / "config.json"
+    for raw in (
+        {"layout": {}},
+        {"layout": {"dictionary_enabled": "off"}},
+        {"layout": {"dictionary_enabled": 0}},
+        {"layout": {"dictionary_enabled": None}},
+        {"layout": {"dictionary_enabled": []}},
+    ):
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        assert SettingsStore(path).dictionary_enabled(), raw
+

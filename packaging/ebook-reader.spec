@@ -35,6 +35,9 @@ datas = [
     # The Kai face and its licence (ADR-025).  The licence has to ship with the font,
     # so both go in as one directory rather than as two separate entries.
     (str(ROOT / "src" / "ebook_reader" / "fonts"), "ebook_reader/fonts"),
+    # The English dictionary and its licence (ADR-026).  Same rule as the font: MIT
+    # requires the notice to travel with every copy, the AppImage's included.
+    (str(ROOT / "src" / "ebook_reader" / "data"), "ebook_reader/data"),
 ]
 
 hiddenimports = [

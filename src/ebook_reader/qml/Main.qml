@@ -482,6 +482,10 @@ ApplicationWindow {
     Shortcut { sequence: "O"; onActivated: ctl && ctl.toggleOutline() }
     Shortcut { sequence: "S"; onActivated: ctl && ctl.toggleSettings() }
     Shortcut { sequence: "Escape"; onActivated: ctl && ctl.closePanels() }
+    // A card left over a page the reader has looked away from explains a word to nobody,
+    // so the window losing the focus takes it down (FR-095).  Qt Quick gives no
+    // "deactivated" signal of its own - `active` changing is the same news.
+    onActiveChanged: if (!active && ctl) { ctl.hideLookup() }
     // The passage is copied the moment the gesture that marked it ends; this is the way
     // to put it back on the clipboard after something else has taken it over - the
     // passage stays marked until the reader puts it down with a click (FR-070).

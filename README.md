@@ -44,7 +44,12 @@
 - **文本选择与复制**（FR-070）：按住 `Shift` 左键划过一段，**松手即进剪贴板**并在状态栏报「已复制 N 字」；
   `Shift` 单击或双击取指针下的**一个词**（中文取指针所在的分句，而不是整段）；`Ctrl+C` 把标出的那段重新放回剪贴板，
   在正文上单击即放下高亮（剪贴板不受影响）。高亮画在那张位图之上，所以滚动时始终贴着自己那一行
-- **鼠标右键菜单**：窗口内任意位置右键即可展开全部操作（打开文件、目录 / 大纲 / 设置、复制、滚动与章节跳转、
+- **悬停查词**（FR-095）：右键菜单「悬停查词」勾上时（**默认开**），把指针停在**一个英文词**上约 0.3 秒，
+  指针旁浮出一张小卡片——音标 + 至多三行中文释义；词典把它收在另一个词头下时会写出来（`went → go`、`don't → do`）。
+  词表**随包分发、不联网**（ECDICT 裁剪版，5.3 MB / 5.8 万词条，见下）；指针移开、滚动、拖拽、打开设置抽屉、换章都会收起；
+  指着汉字或词典里没有的词**什么都不弹**（中文词条留待下一轮，FR-097）。关掉开关就**彻底不查**——不需要按任何键，
+  也没有 `Ctrl` 手势了；这个开关记在配置里，下次打开还是这个选择
+- **鼠标右键菜单**：窗口内任意位置右键即可展开全部操作（打开文件、目录 / 大纲 / 设置、复制、悬停查词、滚动与章节跳转、
   字号 / 行距 / 边距 / 字体 / 对齐 / 主题、关闭面板、全屏、退出），每行右侧标出对应快捷键，当前状态带勾选
 - 目录侧栏、**本卷 / 全书位置百分比**（不显示页码）、阅读位置记忆（跨字号、跨窗口尺寸都有效）
 - 目录项落在它指向的地方：`href` 解析到节、`#frag` 解析到块（EPUB2 常见的空 `<a id>` 标记、`<div id>` 包住段落的写法都算），
@@ -76,37 +81,46 @@ PYTHONPATH=src .venv/bin/python -m ebook_reader 你的书.epub
 安装字体；宋体与黑体仍使用系统字体（回退链见 `src/ebook_reader/typeset/settings.py`），源码运行时
 字体同样从 `src/ebook_reader/fonts/` 读取。
 
-源码运行只需要 PySide6；打可分发的包还需要 PyInstaller。`appimagetool` 与 AppImage runtime
-由 `build-appimage.sh` 自动下载到 `build/tools/`（先直连 GitHub，失败时改用 `ghfast.top` /
-`ghproxy.net` 镜像；也可以用 `APPIMAGETOOL` / `APPIMAGE_RUNTIME` 指向手动下载的文件）。
+源码运行只需要 PySide6；打可分发的包还需要 PyInstaller，以及两个**只在打包时用**的
+外部工具：`appimagetool` 与 AppImage runtime。它们由脚本自动下载到
+`~/.cache/ebook-reader-build/tools/`（`EBR_CACHE_DIR` 可改位置），**只下载一次**，
+之后每次重建都复用；因为不在 `build/` 里，重建不会把它们清掉。下载先直连 GitHub，
+30 秒内不达速就改用 `ghfast.top` / `ghproxy.net` 镜像。完全离线时加 `--offline`，
+也可以设置 `APPIMAGETOOL` / `APPIMAGE_RUNTIME` 指向手动下载的文件。
+
+一条命令重建全部三个产物：
 
 ```bash
 .venv/bin/pip install pyinstaller==6.22.3
 
-# 1) 文件夹版：启动最快，也是 AppImage 的底料
-packaging/build.sh --dir-only
-
-# 2) 从文件夹版生成单个 AppImage
-packaging/build-appimage.sh
+./build-all-packages.sh              # 文件夹版 + 单文件版 + AppImage
+./build-all-packages.sh --offline    # 不联网（构建工具已在缓存里）
+./build-all-packages.sh --no-smoke   # 跳过离屏冒烟测试，快 20 秒左右
 ```
 
-也可以一步完成（`--build` 会先调用 `build.sh --dir-only`，而后者会清空 `dist/` 与 `build/`）：
+也可以分两步（`./build-all-packages.sh` 就是按这个顺序调它们的）：
 
 ```bash
-packaging/build-appimage.sh --build
+packaging/build.sh --dir-only        # 1) 文件夹版：启动最快，也是 AppImage 的底料
+packaging/build-appimage.sh          # 2) 从文件夹版生成 AppImage
 ```
 
 **改了源码之后必须重跑第 1 步。** `build-appimage.sh` 默认只压已有的 `dist/ebook-reader-dir/`，
 它自己不做 PyInstaller——所以只跑第 2 步的话，AppImage 里装的是**上一版程序**（新的快捷键、菜单行、
 文案统统不会出现，看起来像「改了没用」）。文件夹版比源码旧时脚本会打一行警告并提示加 `--build`。
 
+`build.sh` 每次开头都会清空 `dist/` 与 `build/`，所以 `build-appimage.sh --build`（等于「先重建
+文件夹版再压」）会顺手删掉刚做好的单文件版；要三个产物同时留在 `dist/` 里，用
+`./build-all-packages.sh`。中间文件与日志都在 `build/`（`build/logs/` 里是 PyInstaller 与三次冒烟
+测试的输出），构建工具缓存则在 `~/.cache/ebook-reader-build/`。
+
 产物：
 
 | 产物 | 体积 | 说明 |
 |---|---:|---|
-| `dist/ebook-reader-dir/` | 180 MB | 文件夹版，启动最快 |
-| `dist/ebook-reader` | 69 MB | PyInstaller 单文件版，每次启动要解包 |
-| `dist/ebook-reader-x86_64.AppImage` | **64 MB** | 单文件可执行，基于文件夹版，满足 NFR-011（≤150 MB）；其中 18.4 MiB 是内置楷体 |
+| `dist/ebook-reader-dir/` | 188 MB | 文件夹版，启动最快 |
+| `dist/ebook-reader` | 73 MB | PyInstaller 单文件版，每次启动要解包 |
+| `dist/ebook-reader-x86_64.AppImage` | **67 MB** | 单文件可执行，基于文件夹版，满足 NFR-011（≤150 MB）；其中 18.4 MiB 是内置楷体、5.1 MiB 是英汉词典 `data/dict/en.db` |
 
 运行 AppImage：
 
@@ -150,6 +164,10 @@ APPIMAGE_EXTRACT_AND_RUN=1 ./dist/ebook-reader-x86_64.AppImage 你的书.epub
 **严格比对修饰键**，所以 `Ctrl+Shift++` / `Alt+Shift++` 是单独注册的另一条拼写，小键盘的 `+` 走 `Ctrl++` / `Alt++`；
 菜单的 hint 列只印较短的 `=` 版。
 
+**查词是一个开关，不是一个键**：右键菜单「悬停查词」打勾时，把指针停在一个英文词上约 0.3 秒即出卡片（FR-095）；
+取消勾选则整项功能关闭，词典一次也不会被查询。这个选择**记在配置里**（`layout.dictionary_enabled`），下次打开照旧。
+旧版的「按住 `Ctrl`」手势已经去掉：查一个词本来只是「看着它」，让读者为此再按住一个键，等于把一次动作拆成两次。
+
 滚轮一格滚 3 行（与键盘同一套行高，事件被接受、不再冒泡）；鼠标滚轮发的是 `angleDelta`（120 单位 = 一格），
 触控板与平滑 / 自由滚动的滚轮**只发 `pixelDelta`**，于是按像素原样位移——两种形态分开处理，无论哪一台机器都滚得动。
 处理滚轮的那个 QML 处理器还**同时接受鼠标与触摸板设备**：Wayland 上 Qt 把每个滚轮事件都记在座位的指针设备名下，
@@ -167,7 +185,7 @@ Qt 自己的「词」在中文里是到下一个空白为止的整段），单�
 （窗口位图从它下面滑过），占的是正文栏的上边距。它**不是按钮**——回上一章用 `[`、菜单或目录栏。
 章末仍出现一行「下一章 · 〈标题〉」，**居中**于正文栏、底色就是那条「带」，点它即换到那一章（等效 `]`，从列尾回退落在上一章列尾，
 那里又写着「下一章」，一次点击就能回来）；**它绝不会自动带读者离开本章**，离开列尾后那一行也随之消失。
-**鼠标右键在窗口任意位置弹出「全部操作」菜单**（24 行，含勾选状态与快捷键提示，右侧 7 行是字号 / 行距 /
+**鼠标右键在窗口任意位置弹出「全部操作」菜单**（25 行，含勾选状态与快捷键提示，右侧 7 行是字号 / 行距 /
 边距 / 字体 / 对齐 / 主题的子菜单）；**状态栏左下角常驻「目录」按钮**，单击即显示 / 隐藏左栏
 （开关态一眼可见，并标出快捷键 `T`）；目录与大纲占正文两侧的独立栏位（点击栏内条目跳转，都不自动收起，
 便于连续跳转）；设置面板是浮层抽屉，它只让出右侧的大纲栏，不会带走左侧目录。
@@ -183,8 +201,8 @@ Qt 自己的「词」在中文里是到下一个空白为止的整段），单�
 
 ```bash
 .venv/bin/pip install pytest
-QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest        # 约 83 秒，365 项
-QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest tests/unit -q   # 纯 Python，无 GUI，199 项 / 0.9 秒
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest        # 约 88 秒，383 项
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest tests/unit -q   # 纯 Python，无 GUI，211 项 / 1.0 秒
 ```
 
 集成测试直接断言设计文档里的性能指标（单节排版 ≤ 50 ms、单窗口渲染 ≤ 20 ms）与质量指标
@@ -251,7 +269,11 @@ tests/unit/ tests/integration/
 - 自动滚屏是**匀速**的（没有缓入缓出，也没有惯性），并且只在有下一屏可走时才开：本卷只有一屏时会拒绝开启并在状态栏说明；
   漂到这样的卷上（封面、扉页）则原地不动——它的「列尾」同时也是「列首」，若当成章尾就会自己翻到第一章去
 
-详见 `arch/architecture.md` 第 2.2 节与 ADR-001 / ADR-016 / ADR-020 / ADR-021 / ADR-022 / ADR-023 / ADR-024。
+- 查词用的是**裁剪过的**英汉词表（ECDICT 的 5.8 万条：词频前 6 万 + 考试词），罕见专名与生僻义项查不到——查不到时
+  **什么都不弹**，不弹「未找到」；中文词条还没有（要中文词表与「最长匹配」的实测，见 FR-097），所以指着汉字不弹卡片
+- 查词是一次**索引查找**（SQLite，只读、懒打开），不联网、不写盘；词表与许可文本随包分发（ADR-026）
+
+详见 `arch/architecture.md` 第 2.2 节与 ADR-001 / ADR-016 / ADR-020 / ADR-021 / ADR-022 / ADR-023 / ADR-024 / ADR-026。
 
 ## 实测数据（P0 门禁）
 
@@ -268,4 +290,4 @@ tests/unit/ tests/integration/
 | 目录层级还原：平铺目录的书逐行读文档开头 1 KB（FR-012 / ADR-020） | **EPUB 3 参考书 2.3 → 14 ms**、EPUB 2 参考书 **5.3 → 16 ms**、合集参考书 **±0**（只算目录构建；`open()` 本身不变） |
 | 目录行目标文档读一次开头 ≤ 4 KB：判断是否落在**纯图片扉页**上（FR-016 / ADR-021） | `open()` + `toc` **+2~5 ms**（EPUB 3 参考书 15.6 → 17.4 ms、EPUB 2 参考书 15.4 → 19.1 ms、合集 37.6 → 39.0 ms、新目标书 48.6 → 53.7 ms） |
 | 自动滚屏一跳（50 ms）的控制器开销（FR-094） | **19 µs**（20 跳/秒 ≈ 0.4 ms CPU/秒；中速 9 px/秒，约 3.5 s 才跨过一个 32 px 渲染量子） |
-| 测试 | **365 项 / 约 83 s / 全绿**（单元 199 项 / 0.9 s，集成 166 项 / 81 s） |
+| 测试 | **383 项 / 约 88 s / 全绿**（单元 211 项 / 1.0 s，集成 172 项 / 87 s） |

@@ -29,7 +29,15 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-ebook_reader = ["qml/*.qml", "qml/**/*.qml", "qml/shaders/*", "fonts/*.ttf", "fonts/*.txt"]
+ebook_reader = [
+    "qml/*.qml",
+    "qml/**/*.qml",
+    "qml/shaders/*",
+    "fonts/*.ttf",
+    "fonts/*.txt",
+    # The English dictionary and the MIT licence it must travel with (ADR-026).
+    "data/dict/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
